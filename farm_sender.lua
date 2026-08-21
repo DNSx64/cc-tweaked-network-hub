@@ -29,11 +29,32 @@ end
 -- ergänzt werden. Groß-/Kleinschreibung und Unterstriche spielen dank
 -- normalizeTypeName() keine Rolle (z. B. passt "energy_cube" auf "energyCube").
 local TYPE_CATEGORIES = {
-    energy = { "energyDetector", "energyStorage", "capacitor", "battery", "rfStorage", "energyCube", "energyCell", "inductionPort" },
-    storage = { "meBridge", "ae2", "meBridgeProxy", "refinedStorage", "rsBridge", "storageBridge" },
-    fluid = { "tank", "fluidStorage", "liquidTank", "dynamicTank", "barrel", "thermalTank" },
-    inventory = { "chest", "inventory", "supply", "crate" },
-    machine = { "machine", "furnace", "assembler", "crusher", "sawmill" },
+    energy = {
+        "energyDetector", "energyStorage", "energy_storage", "capacitor", "capacitorBank",
+        "battery", "rfStorage", "energyCube", "energyCell", "inductionPort", "inductionMatrix",
+        "powahCell", "reactorPort", "reactorChassis", "creativeCell", "basicCapacitorBank",
+    },
+    storage = {
+        "meBridge", "ae2", "meBridgeProxy", "meController", "refinedStorage", "rsBridge",
+        "storageBridge", "rsController", "diskDrive",
+    },
+    fluid = {
+        "tank", "fluidStorage", "fluid_storage", "liquidTank", "dynamicTank", "barrel",
+        "thermalTank", "fluidTank", "fluidHandler", "basicFluidTank", "portableTank",
+    },
+    inventory = {
+        "chest", "inventory", "supply", "crate", "drawer", "drawerController", "shulkerBox",
+        "cache", "woodenChest", "ironChest", "backpack",
+    },
+    machine = {
+        "machine", "furnace", "assembler", "crusher", "sawmill", "digitalMiner", "sps",
+        "fissionReactor", "fissionReactorLogicAdapter", "boilerValve", "turbine", "turbineValve",
+        "bigReactorsReactor", "biggerReactorsReactor", "reactor", "heatGenerator", "dynamo",
+        "electricFurnace", "enrichmentChamber", "combiner", "crystallizer", "compressor",
+        "purificationChamber", "chemicalReactor", "inductionSmelter", "metallurgicInfuser",
+        "chemicalInfuser", "pressurizedReactionChamber", "osmiumCompressor", "rollingMachine",
+        "quarry", "pump", "plantGatherer", "blockPlacer", "blockBreaker", "laserDrill",
+    },
 }
 
 local function findPeripheral(name)
@@ -158,55 +179,79 @@ local function countTable(value)
     return count
 end
 
+-- Probiert nacheinander mehrere Getter-Methodennamen an einem Gerät durch (viele Mods
+-- benennen dieselbe Sache unterschiedlich) und gibt den ersten numerischen Treffer zurück.
+local function extractNumericStat(device, getters)
+    for _, name in ipairs(getters) do
+        local value = call(device, name)
+        if value ~= nil then
+            local number = tonumber(value)
+            if number then
+                return number
+            end
+        end
+    end
+    return nil
+end
+
+local ENERGY_STORED_GETTERS = { "getEnergyStored", "getStoredEnergy", "getEnergyLevel", "getEnergy", "getStored" }
+local ENERGY_CAPACITY_GETTERS = { "getMaxEnergyStored", "getCapacity", "getMaxEnergy", "getMaxStored", "getEnergyCapacity" }
+local FLUID_STORED_GETTERS = { "getFluidAmount", "getAmount", "getStored" }
+local FLUID_CAPACITY_GETTERS = { "getCapacity", "getMaxAmount", "getMaxStored" }
+
+-- Liefert 1) die aufsummierte Übersicht (für die Tabelle) und 2) eine Detail-Liste mit
+-- jedem EINZELNEN Gerät (für das Detail-Menü im Hub). Geräte ohne auswertbare Werte
+-- (N/A) werden gar nicht erst in die Detail-Liste aufgenommen -> automatisch ausgeblendet.
 local function getEnergy()
     local devices = findAllByCategory("energy")
     if #devices == 0 then
-        return nil
+        return nil, nil
     end
 
     local totalStored, totalCapacity = 0, 0
-    local any = false
+    local details = {}
 
     for _, entry in ipairs(devices) do
         local device = entry.device
-        local stored = call(device, "getEnergyStored")
-            or call(device, "getStoredEnergy")
-            or call(device, "getEnergyLevel")
-            or call(device, "getEnergy")
-            or call(device, "getStored")
+        local stored = extractNumericStat(device, ENERGY_STORED_GETTERS)
+        local capacity = extractNumericStat(device, ENERGY_CAPACITY_GETTERS)
 
-        local capacity = call(device, "getMaxEnergyStored")
-            or call(device, "getCapacity")
-            or call(device, "getMaxEnergy")
-            or call(device, "getMaxStored")
-            or call(device, "getEnergyCapacity")
-
-        if stored ~= nil and capacity ~= nil then
-            totalStored = totalStored + (tonumber(stored) or 0)
-            totalCapacity = totalCapacity + (tonumber(capacity) or 0)
-            any = true
+        if stored ~= nil and capacity ~= nil and capacity > 0 then
+            totalStored = totalStored + stored
+            totalCapacity = totalCapacity + capacity
+            local percent = math.floor((stored / capacity) * 100)
+            table.insert(details, {
+                category = "energy",
+                source = entry.name,
+                text = string.format("%s: %d/%d FE (%d%%)", entry.name, stored, capacity, percent),
+                percent = percent,
+            })
         end
     end
 
-    if not any or totalCapacity <= 0 then
-        return nil
+    if totalCapacity <= 0 then
+        return nil, nil
     end
 
-    return {
+    local summary = {
         stored = totalStored,
         capacity = totalCapacity,
         percent = math.floor((totalStored / totalCapacity) * 100),
         sources = #devices,
     }
+
+    return summary, details
 end
 
 local function getME()
     local devices = findAllByCategory("storage")
     if #devices == 0 then
-        return nil
+        return nil, nil
     end
 
     local totalCount = 0
+    local details = {}
+
     for _, entry in ipairs(devices) do
         local items = call(entry.device, "getItems")
             or call(entry.device, "listItems")
@@ -214,106 +259,154 @@ local function getME()
             or call(entry.device, "getAvailableItems")
 
         if type(items) == "table" then
-            totalCount = totalCount + countTable(items)
+            local count = countTable(items)
+            totalCount = totalCount + count
+            table.insert(details, {
+                category = "storage",
+                source = entry.name,
+                text = string.format("%s: %d Eintraege", entry.name, count),
+            })
         end
     end
 
-    return {
+    if #details == 0 then
+        return nil, nil
+    end
+
+    local summary = {
         count = totalCount,
         items = totalCount,
         sources = #devices,
     }
+
+    return summary, details
 end
 
 local function getFluid()
     local devices = findAllByCategory("fluid")
     if #devices == 0 then
-        return nil
+        return nil, nil
     end
 
     local totalStored, totalCapacity = 0, 0
-    local any = false
+    local details = {}
 
     for _, entry in ipairs(devices) do
         local device = entry.device
-        local stored = call(device, "getFluidAmount")
-            or call(device, "getAmount")
-            or call(device, "getStored")
+        local stored = extractNumericStat(device, FLUID_STORED_GETTERS)
+        local capacity = extractNumericStat(device, FLUID_CAPACITY_GETTERS)
 
-        local capacity = call(device, "getCapacity")
-            or call(device, "getMaxAmount")
-            or call(device, "getMaxStored")
-
-        if stored ~= nil and capacity ~= nil then
-            totalStored = totalStored + (tonumber(stored) or 0)
-            totalCapacity = totalCapacity + (tonumber(capacity) or 0)
-            any = true
+        if stored ~= nil and capacity ~= nil and capacity > 0 then
+            totalStored = totalStored + stored
+            totalCapacity = totalCapacity + capacity
+            local percent = math.floor((stored / capacity) * 100)
+            table.insert(details, {
+                category = "fluid",
+                source = entry.name,
+                text = string.format("%s: %d/%d mB (%d%%)", entry.name, stored, capacity, percent),
+                percent = percent,
+            })
         end
     end
 
-    if not any or totalCapacity <= 0 then
-        return nil
+    if totalCapacity <= 0 then
+        return nil, nil
     end
 
-    return {
+    local summary = {
         stored = totalStored,
         capacity = totalCapacity,
         percent = math.floor((totalStored / totalCapacity) * 100),
         sources = #devices,
     }
+
+    return summary, details
 end
 
 local function getInventory()
     local devices = findAllByCategory("inventory")
     if #devices == 0 then
-        return nil
+        return nil, nil
     end
 
     local totalCount = 0
+    local details = {}
+
     for _, entry in ipairs(devices) do
         local items = call(entry.device, "list")
             or call(entry.device, "getItems")
             or call(entry.device, "getAllItems")
 
         if type(items) == "table" then
-            totalCount = totalCount + countTable(items)
+            local count = countTable(items)
+            totalCount = totalCount + count
+            table.insert(details, {
+                category = "inventory",
+                source = entry.name,
+                text = string.format("%s: %d Slots belegt", entry.name, count),
+            })
         end
     end
 
-    return {
+    if #details == 0 then
+        return nil, nil
+    end
+
+    local summary = {
         count = totalCount,
         sources = #devices,
     }
+
+    return summary, details
 end
 
 local function getMachineState()
     local devices = findAllByCategory("machine")
     if #devices == 0 then
-        return "N/A"
+        return "N/A", nil
     end
+
+    local details = {}
+    local summaryStatus = nil
 
     for _, entry in ipairs(devices) do
         local device = entry.device
         local status = call(device, "getStatus")
             or call(device, "getMachineStatus")
             or call(device, "getState")
-            or call(device, "isRunning")
 
-        if type(status) == "boolean" then
-            return status and "RUNNING" or "IDLE"
-        end
-
+        local statusText = nil
         if type(status) == "string" then
-            return status
+            statusText = status
+        elseif type(status) == "boolean" then
+            statusText = status and "RUNNING" or "IDLE"
+        else
+            local running = call(device, "isRunning")
+            if type(running) == "boolean" then
+                statusText = running and "RUNNING" or "IDLE"
+            else
+                local active = call(device, "isActive")
+                if type(active) == "boolean" then
+                    statusText = active and "ACTIVE" or "IDLE"
+                end
+            end
         end
 
-        local active = call(device, "isActive")
-        if type(active) == "boolean" then
-            return active and "ACTIVE" or "IDLE"
+        if statusText then
+            summaryStatus = summaryStatus or statusText
+            table.insert(details, {
+                category = "machine",
+                source = entry.name,
+                text = string.format("%s: %s", entry.name, statusText),
+            })
         end
     end
 
-    return "OK"
+    if #details == 0 then
+        return "OK", nil
+    end
+
+    return summaryStatus or "OK", details
 end
 
 local function collectStatus()
@@ -329,13 +422,32 @@ local function collectStatus()
         fluid = nil,
         inventory = nil,
         machineStatus = "OK",
+        details = {},
     }
 
-    payload.energy = getEnergy()
-    payload.me = getME()
-    payload.fluid = getFluid()
-    payload.inventory = getInventory()
-    payload.machineStatus = getMachineState()
+    local energyDetails, fluidDetails, meDetails, invDetails, machineDetails
+
+    payload.energy, energyDetails = getEnergy()
+    payload.me, meDetails = getME()
+    payload.fluid, fluidDetails = getFluid()
+    payload.inventory, invDetails = getInventory()
+    payload.machineStatus, machineDetails = getMachineState()
+
+    -- Alle Einzelgeräte-Details (jedes Mod-Peripheriegerät für sich) werden mit
+    -- angehängt, damit der Hub im Detail-Menü ALLES einzeln anzeigen kann.
+    local function appendAll(list)
+        if type(list) == "table" then
+            for _, item in ipairs(list) do
+                table.insert(payload.details, item)
+            end
+        end
+    end
+
+    appendAll(energyDetails)
+    appendAll(fluidDetails)
+    appendAll(meDetails)
+    appendAll(invDetails)
+    appendAll(machineDetails)
 
     if payload.energy and payload.energy.capacity > 0 then
         payload.status = (payload.energy.percent >= 25) and "OK" or "LOW_ENERGY"

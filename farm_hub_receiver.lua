@@ -27,6 +27,9 @@ local hub = {
     view = "overview", -- "overview" | "detail"
     selectedID = nil,
     rowRects = {},
+    detailScroll = 0,
+    detailMaxScroll = 0,
+    lastDetailVisibleRows = 10,
 }
 
 local function trim(value, maxLen)
@@ -195,19 +198,19 @@ end
 
 local function formatEnergy(val)
     if type(val) ~= "table" then
-        return "N/A"
+        return "-"
     end
     local stored = tonumber(val.stored) or 0
     local capacity = tonumber(val.capacity) or 0
     if capacity <= 0 then
-        return "N/A"
+        return "-"
     end
     return string.format("%d/%d (%d%%)", stored, capacity, math.floor((stored / capacity) * 100))
 end
 
 local function formatMe(val)
     if type(val) ~= "table" then
-        return "N/A"
+        return "-"
     end
     local count = tonumber(val.count) or tonumber(val.items) or 0
     return tostring(count)
@@ -215,12 +218,12 @@ end
 
 local function formatFluid(val)
     if type(val) ~= "table" then
-        return "N/A"
+        return "-"
     end
     local stored = tonumber(val.stored) or 0
     local capacity = tonumber(val.capacity) or 0
     if capacity <= 0 then
-        return "N/A"
+        return "-"
     end
     return string.format("%d/%d (%d%%)", stored, capacity, math.floor((stored / capacity) * 100))
 end
@@ -341,6 +344,44 @@ local function renderOverview(canvas, width, height)
     callSelf(canvas, "write", trim("Live: " .. tostring(#rows) .. " sender" .. suffix .. " | Zeile antippen fuer Details", width))
 end
 
+-- Gruppiert ALLE einzeln gemeldeten Peripheriegeräte (jedes Mod-Gerät für sich, egal
+-- ob Mekanism, Thermal, AE2/RS, Reaktoren, Tanks, Truhen, ...) nach Kategorie und baut
+-- daraus eine flache Zeilenliste fürs Detail-Menü. Geräte ohne verwertbare Werte wurden
+-- vom Sender bereits gar nicht erst mitgeschickt -> "N/A" taucht hier nie auf.
+local function buildDetailLines(data)
+    local lines = {}
+    local categories = { "energy", "fluid", "storage", "inventory", "machine" }
+    local headers = {
+        energy = "ENERGIE",
+        fluid = "FLUESSIGKEIT",
+        storage = "ME / STORAGE",
+        inventory = "INVENTAR",
+        machine = "MASCHINEN",
+    }
+
+    local grouped = {}
+    for _, item in ipairs(data.details or {}) do
+        grouped[item.category] = grouped[item.category] or {}
+        table.insert(grouped[item.category], item)
+    end
+
+    for _, category in ipairs(categories) do
+        local items = grouped[category]
+        if items and #items > 0 then
+            table.insert(lines, { header = true, text = headers[category] or category:upper() })
+            for _, item in ipairs(items) do
+                table.insert(lines, { text = item.text, percent = item.percent })
+            end
+        end
+    end
+
+    if #lines == 0 then
+        table.insert(lines, { text = "Keine Daten verfuegbar." })
+    end
+
+    return lines
+end
+
 local function renderDetail(canvas, width, height)
     local sender = hub.senders[hub.selectedID]
     local data = sender and sender.data
@@ -366,69 +407,79 @@ local function renderDetail(canvas, width, height)
 
     callSelf(canvas, "setCursorPos", 1, 4)
     callSelf(canvas, "setTextColor", colors.white)
-    callSelf(canvas, "write", trim("Maschine: " .. safeString(data.machine, "?"), width))
+    callSelf(canvas, "write", "Maschine: ")
+    callSelf(canvas, "setTextColor", colors.lightGray)
+    callSelf(canvas, "write", trim(safeString(data.machine, "?"), math.max(1, width - 10)))
 
+    callSelf(canvas, "setCursorPos", 1, 5)
+    callSelf(canvas, "setTextColor", colors.white)
+    callSelf(canvas, "write", "Status: ")
+    callSelf(canvas, "setTextColor", statusColor(data.status))
+    callSelf(canvas, "write", tostring(data.status or "OK"))
+
+    local top = 6
+    local bottom = height - 1
+    local visibleRows = math.max(1, bottom - top + 1)
+    hub.lastDetailVisibleRows = visibleRows
+
+    local lines = buildDetailLines(data)
+    hub.detailMaxScroll = math.max(0, #lines - visibleRows)
+    hub.detailScroll = math.max(0, math.min(hub.detailScroll or 0, hub.detailMaxScroll))
+
+    local y = top
     local barWidth = math.max(5, math.min(width, 30))
-    local y = 6
 
-    callSelf(canvas, "setCursorPos", 1, y)
-    callSelf(canvas, "setTextColor", colors.white)
-    callSelf(canvas, "write", "Energie:")
-    if type(data.energy) == "table" and (tonumber(data.energy.capacity) or 0) > 0 then
-        drawBar(canvas, 1, y + 1, barWidth, data.energy.percent, colors.green, colors.gray)
-        callSelf(canvas, "setCursorPos", 1, y + 2)
-        callSelf(canvas, "setTextColor", colors.lightGray)
-        callSelf(canvas, "write", trim(formatEnergy(data.energy), width))
-    else
-        callSelf(canvas, "setCursorPos", 1, y + 1)
-        callSelf(canvas, "setTextColor", colors.gray)
-        callSelf(canvas, "write", "N/A")
-    end
-
-    y = y + 4
-    callSelf(canvas, "setCursorPos", 1, y)
-    callSelf(canvas, "setTextColor", colors.white)
-    callSelf(canvas, "write", trim("ME/Storage: " .. formatMe(data.me), width))
-
-    y = y + 2
-    callSelf(canvas, "setCursorPos", 1, y)
-    callSelf(canvas, "setTextColor", colors.white)
-    callSelf(canvas, "write", "Fluessigkeit:")
-    if type(data.fluid) == "table" and (tonumber(data.fluid.capacity) or 0) > 0 then
-        drawBar(canvas, 1, y + 1, barWidth, data.fluid.percent, colors.blue, colors.gray)
-        callSelf(canvas, "setCursorPos", 1, y + 2)
-        callSelf(canvas, "setTextColor", colors.lightGray)
-        callSelf(canvas, "write", trim(formatFluid(data.fluid), width))
-    else
-        callSelf(canvas, "setCursorPos", 1, y + 1)
-        callSelf(canvas, "setTextColor", colors.gray)
-        callSelf(canvas, "write", "N/A")
-    end
-
-    y = y + 4
-    callSelf(canvas, "setCursorPos", 1, y)
-    callSelf(canvas, "setTextColor", colors.white)
-    callSelf(canvas, "write", trim("Inventar: " .. formatMe(data.inventory), width))
-
-    y = y + 2
-    if y <= height then
-        callSelf(canvas, "setCursorPos", 1, y)
-        callSelf(canvas, "setTextColor", colors.white)
-        callSelf(canvas, "write", "Status: ")
-        callSelf(canvas, "setTextColor", statusColor(data.status))
-        callSelf(canvas, "write", tostring(data.status or "OK"))
-    end
-
-    if height > y then
-        local ageText = "?"
-        if sender.lastSeen then
-            local age = math.max(0, math.floor((os.clock() or 0) - sender.lastSeen))
-            ageText = age .. "s"
+    for i = 1 + hub.detailScroll, #lines do
+        if y > bottom then
+            break
         end
-        callSelf(canvas, "setCursorPos", 1, height)
-        callSelf(canvas, "setTextColor", colors.cyan)
-        callSelf(canvas, "write", trim("Zuletzt gesehen vor " .. ageText, width))
+        local line = lines[i]
+
+        if line.header then
+            callSelf(canvas, "setCursorPos", 1, y)
+            callSelf(canvas, "setTextColor", colors.orange)
+            callSelf(canvas, "write", trim("-- " .. line.text .. " --", width))
+            y = y + 1
+        else
+            callSelf(canvas, "setCursorPos", 1, y)
+            callSelf(canvas, "setTextColor", colors.lightGray)
+            callSelf(canvas, "write", trim(line.text, width))
+            y = y + 1
+
+            if line.percent and y <= bottom then
+                local barColor = colors.green
+                if line.percent < 25 then
+                    barColor = colors.red
+                elseif line.percent < 60 then
+                    barColor = colors.yellow
+                end
+                drawBar(canvas, 1, y, barWidth, line.percent, barColor, colors.gray)
+                y = y + 1
+            end
+        end
     end
+
+    local footerParts = {}
+    if sender.lastSeen then
+        local age = math.max(0, math.floor((os.clock() or 0) - sender.lastSeen))
+        table.insert(footerParts, "vor " .. age .. "s")
+    end
+    if hub.detailMaxScroll > 0 then
+        local hint = {}
+        if hub.detailScroll > 0 then
+            table.insert(hint, "^ oben")
+        end
+        if hub.detailScroll < hub.detailMaxScroll then
+            table.insert(hint, "v unten")
+        end
+        if #hint > 0 then
+            table.insert(footerParts, table.concat(hint, " / "))
+        end
+    end
+
+    callSelf(canvas, "setCursorPos", 1, height)
+    callSelf(canvas, "setTextColor", colors.cyan)
+    callSelf(canvas, "write", trim(table.concat(footerParts, "  |  "), width))
 end
 
 local function render()
@@ -463,6 +514,7 @@ local function handleTouch(x, y)
             if y == rowY then
                 hub.view = "detail"
                 hub.selectedID = id
+                hub.detailScroll = 0
                 render()
                 return
             end
@@ -471,8 +523,22 @@ local function handleTouch(x, y)
         if y == 1 and x <= 10 then
             hub.view = "overview"
             hub.selectedID = nil
+            hub.detailScroll = 0
             render()
             return
+        end
+
+        -- Scrollen per Antippen: oberer Bereich der Liste = hoch, unterer Bereich = runter.
+        local contentTop = 6
+        local visible = hub.lastDetailVisibleRows or 10
+        if y >= contentTop and y <= contentTop + visible - 1 then
+            local half = contentTop + math.floor(visible / 2)
+            if y < half then
+                hub.detailScroll = math.max(0, (hub.detailScroll or 0) - 5)
+            else
+                hub.detailScroll = math.min(hub.detailMaxScroll or 0, (hub.detailScroll or 0) + 5)
+            end
+            render()
         end
     end
 end
