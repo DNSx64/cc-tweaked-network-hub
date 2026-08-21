@@ -502,11 +502,14 @@ local function sendPacket()
     if cfg.hubID and cfg.hubID > 0 then
         rednet.send(cfg.hubID, packet, cfg.protocol)
     else
-        rednet.broadcast(cfg.protocol, packet)
+        -- rednet.broadcast(message, protocol) - Reihenfolge exakt so, sonst
+        -- verwirft der Hub die Nachricht wegen falschem Protokoll.
+        rednet.broadcast(packet, cfg.protocol)
     end
 end
 
 local function main()
+    print("[SENDER] Version 3.0 startet...")
     waitForModem()
     reportPeripheralChanges()
 
