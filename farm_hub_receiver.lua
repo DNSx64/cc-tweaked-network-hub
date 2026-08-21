@@ -197,38 +197,6 @@ local function safeString(value, fallback)
     return tostring(value)
 end
 
-local function formatEnergy(val)
-    if type(val) ~= "table" then
-        return "-"
-    end
-    local stored = tonumber(val.stored) or 0
-    local capacity = tonumber(val.capacity) or 0
-    if capacity <= 0 then
-        return "-"
-    end
-    return string.format("%d/%d (%d%%)", stored, capacity, math.floor((stored / capacity) * 100))
-end
-
-local function formatMe(val)
-    if type(val) ~= "table" then
-        return "-"
-    end
-    local count = tonumber(val.count) or tonumber(val.items) or 0
-    return tostring(count)
-end
-
-local function formatFluid(val)
-    if type(val) ~= "table" then
-        return "-"
-    end
-    local stored = tonumber(val.stored) or 0
-    local capacity = tonumber(val.capacity) or 0
-    if capacity <= 0 then
-        return "-"
-    end
-    return string.format("%d/%d (%d%%)", stored, capacity, math.floor((stored / capacity) * 100))
-end
-
 local function statusColor(status)
     status = tostring(status or ""):upper()
     if status == "RUNNING" or status == "ACTIVE" or status == "OK" then
@@ -264,13 +232,8 @@ local function collectRows()
         if type(data) == "table" then
             table.insert(rows, {
                 id = id,
-                name = trim(data.name or ("Node-" .. tostring(id)), 10),
-                energy = formatEnergy(data.energy),
-                me = formatMe(data.me),
-                fluid = formatFluid(data.fluid),
-                inv = formatMe(data.inventory),
+                name = trim(data.name or ("Node-" .. tostring(id)), 14),
                 status = data.status or "OK",
-                machine = safeString(data.machine or data.machineStatus, "OK"),
             })
         end
     end
@@ -282,59 +245,141 @@ local function collectRows()
     return rows
 end
 
+-- Summiert Energie/Items/Fluessigkeit ueber ALLE Sender im Netzwerk (nicht nur ein
+-- einzelnes ME-System) fuer die Netzwerk-Dashboard-Anzeige oben in der Uebersicht.
+local function aggregateNetwork()
+    local totals = {
+        energyStored = 0,
+        energyCapacity = 0,
+        itemCount = 0,
+        fluidStored = 0,
+        fluidCapacity = 0,
+    }
+
+    for _, sender in pairs(hub.senders) do
+        local data = sender and sender.data
+        if type(data) == "table" then
+            if type(data.energy) == "table" then
+                totals.energyStored = totals.energyStored + (tonumber(data.energy.stored) or 0)
+                totals.energyCapacity = totals.energyCapacity + (tonumber(data.energy.capacity) or 0)
+            end
+
+            if type(data.me) == "table" then
+                totals.itemCount = totals.itemCount + (tonumber(data.me.count) or tonumber(data.me.items) or 0)
+            end
+
+            if type(data.fluid) == "table" then
+                totals.fluidStored = totals.fluidStored + (tonumber(data.fluid.stored) or 0)
+                totals.fluidCapacity = totals.fluidCapacity + (tonumber(data.fluid.capacity) or 0)
+            end
+        end
+    end
+
+    return totals
+end
+
+-- Zeichnet eine Dashboard-Statuszeile (Label + Wert + Prozent rechtsbuendig), optional
+-- mit Fortschrittsbalken darunter. Gibt die naechste freie Zeile zurueck. Werte ohne
+-- Prozentangabe (percent == nil) zeigen keinen Balken -> "N/A"-Zeilen werden so gar
+-- nicht erst gebaut (vom Aufrufer ausgelassen), statt leer angezeigt zu werden.
+local function renderStatLine(canvas, y, width, label, valueText, percent, barColor)
+    callSelf(canvas, "setCursorPos", 1, y)
+    callSelf(canvas, "setTextColor", colors.white)
+    callSelf(canvas, "write", label .. ": ")
+
+    local percentText = percent and (percent .. "%") or ""
+    local valueWidth = math.max(0, width - #label - 2 - #percentText - 1)
+
+    callSelf(canvas, "setTextColor", colors.lightGray)
+    callSelf(canvas, "write", trim(valueText, valueWidth))
+
+    if percent then
+        callSelf(canvas, "setCursorPos", math.max(1, width - #percentText + 1), y)
+        callSelf(canvas, "setTextColor", colors.yellow)
+        callSelf(canvas, "write", percentText)
+
+        drawBar(canvas, 1, y + 1, width, percent, barColor, colors.gray)
+        return y + 2
+    end
+
+    return y + 1
+end
+
 local function renderOverview(canvas, width, height)
     hub.rowRects = {}
 
+    -- Kopfzeile: Titel links, ONLINE-Status mittig, Uhrzeit rechts.
     callSelf(canvas, "setCursorPos", 1, 1)
     callSelf(canvas, "setTextColor", colors.yellow)
-    callSelf(canvas, "write", trim(cfg.title .. "  " .. os.date("%H:%M:%S"), width))
+    callSelf(canvas, "write", trim(cfg.title, math.floor(width / 2)))
+
+    callSelf(canvas, "setCursorPos", math.floor(width / 2) + 1, 1)
+    callSelf(canvas, "setTextColor", colors.lime)
+    callSelf(canvas, "write", "ONLINE")
+
+    local clock = os.date("%H:%M:%S")
+    callSelf(canvas, "setCursorPos", math.max(1, width - #clock + 1), 1)
+    callSelf(canvas, "setTextColor", colors.lightGray)
+    callSelf(canvas, "write", clock)
 
     callSelf(canvas, "setCursorPos", 1, 2)
     callSelf(canvas, "setTextColor", colors.gray)
     callSelf(canvas, "write", string.rep("-", width))
 
-    local rows = collectRows()
+    -- Netzwerk-Dashboard: Energie/Items/Fluessigkeit summiert ueber ALLE Systeme.
+    local totals = aggregateNetwork()
+    local y = 3
 
-    local header = { "ID", "NODE", "ENERGY", "ME", "FLUID", "INV", "STAT" }
-    local xPos = {1, 5, 17, 31, 36, 45, 50}
-
-    for i = 1, #header do
-        callSelf(canvas, "setCursorPos", xPos[i], 3)
-        callSelf(canvas, "setTextColor", colors.white)
-        callSelf(canvas, "write", trim(header[i], 10))
+    if totals.energyCapacity > 0 then
+        local percent = math.floor((totals.energyStored / totals.energyCapacity) * 100)
+        y = renderStatLine(canvas, y, width, "Energie", string.format("%d / %d RF", totals.energyStored, totals.energyCapacity), percent, colors.orange)
     end
 
-    local y = 4
+    if totals.itemCount > 0 then
+        y = renderStatLine(canvas, y, width, "Items", tostring(totals.itemCount), nil, nil)
+    end
+
+    if totals.fluidCapacity > 0 then
+        local percent = math.floor((totals.fluidStored / totals.fluidCapacity) * 100)
+        y = renderStatLine(canvas, y, width, "Fluessigkeit", string.format("%d / %d mB", totals.fluidStored, totals.fluidCapacity), percent, colors.blue)
+    end
+
+    y = y + 1
+
+    local rows = collectRows()
+
+    callSelf(canvas, "setCursorPos", 1, y)
+    callSelf(canvas, "setTextColor", colors.orange)
+    callSelf(canvas, "write", trim(string.format("NODES (%d online)", #rows), width))
+    y = y + 1
+
     for i = 1, #rows do
         local row = rows[i]
         if y >= height then
             break
         end
 
-        local values = {
-            tostring(row.id),
-            row.name,
-            row.energy,
-            row.me,
-            row.fluid,
-            row.inv,
-            row.status,
-        }
+        local statusText = row.status
+        local prefix = string.format("%-3s %s", tostring(row.id), row.name)
+        local maxPrefixWidth = math.max(0, width - #statusText - 4)
 
-        local rowColor = (i % 2 == 0) and colors.gray or colors.lime
+        callSelf(canvas, "setCursorPos", 1, y)
+        callSelf(canvas, "setTextColor", statusColor(row.status))
+        callSelf(canvas, "write", "> ")
 
-        for c = 1, #values do
-            callSelf(canvas, "setCursorPos", xPos[c], y)
-            callSelf(canvas, "setTextColor", (c == #values) and statusColor(row.status) or rowColor)
-            callSelf(canvas, "write", trim(values[c], 10))
-        end
+        callSelf(canvas, "setTextColor", colors.white)
+        callSelf(canvas, "write", trim(prefix, maxPrefixWidth))
+
+        callSelf(canvas, "setCursorPos", math.max(1, width - #statusText + 1), y)
+        callSelf(canvas, "setTextColor", statusColor(row.status))
+        callSelf(canvas, "write", statusText)
 
         hub.rowRects[row.id] = y
         y = y + 1
     end
 
-    if #rows == 0 then
-        callSelf(canvas, "setCursorPos", 1, 5)
+    if #rows == 0 and y < height then
+        callSelf(canvas, "setCursorPos", 1, y)
         callSelf(canvas, "setTextColor", colors.yellow)
         callSelf(canvas, "write", "Warte auf Sender...")
     end
@@ -342,7 +387,7 @@ local function renderOverview(canvas, width, height)
     callSelf(canvas, "setCursorPos", 1, height)
     callSelf(canvas, "setTextColor", colors.cyan)
     local suffix = hub.monitor and "" or " (Fallback: eigener Bildschirm)"
-    callSelf(canvas, "write", trim("Live: " .. tostring(#rows) .. " sender" .. suffix .. " | Zeile antippen fuer Details", width))
+    callSelf(canvas, "write", trim("Zeile antippen fuer Details" .. suffix, width))
 end
 
 -- Gruppiert ALLE einzeln gemeldeten Peripheriegeräte (jedes Mod-Gerät für sich, egal
