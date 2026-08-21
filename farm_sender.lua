@@ -179,6 +179,17 @@ local function countTable(value)
     return count
 end
 
+-- Grosse Zahlen lesbar machen (K/M/G/T), z. B. 1.5M.
+local function humanize(n)
+    n = tonumber(n) or 0
+    local a = math.abs(n)
+    if a >= 1e12 then return string.format("%.1fT", n / 1e12) end
+    if a >= 1e9  then return string.format("%.1fG", n / 1e9)  end
+    if a >= 1e6  then return string.format("%.1fM", n / 1e6)  end
+    if a >= 1e3  then return string.format("%.1fK", n / 1e3)  end
+    return tostring(math.floor(n + 0.5))
+end
+
 -- Probiert nacheinander mehrere Getter-Methodennamen an einem Gerät durch (viele Mods
 -- benennen dieselbe Sache unterschiedlich) und gibt den ersten numerischen Treffer zurück.
 local function extractNumericStat(device, getters)
@@ -249,22 +260,60 @@ local function getME()
         return nil, nil
     end
 
-    local totalCount = 0
+    local totalItems, totalTypes = 0, 0
     local details = {}
 
     for _, entry in ipairs(devices) do
-        local items = call(entry.device, "getItems")
-            or call(entry.device, "listItems")
-            or call(entry.device, "getItemList")
-            or call(entry.device, "getAvailableItems")
+        local device = entry.device
 
+        -- RS/ME-Bridge: listItems() liefert je Eintrag ein "amount"-Feld (echte
+        -- Stueckzahl). Wir summieren die Mengen UND zaehlen die Item-Typen.
+        local items = call(device, "listItems")
+            or call(device, "getItems")
+            or call(device, "getItemList")
+            or call(device, "getAvailableItems")
+
+        local deviceItems, deviceTypes = 0, 0
         if type(items) == "table" then
-            local count = countTable(items)
-            totalCount = totalCount + count
+            for _, item in pairs(items) do
+                if type(item) == "table" then
+                    deviceTypes = deviceTypes + 1
+                    deviceItems = deviceItems + (tonumber(item.amount) or tonumber(item.count) or 0)
+                end
+            end
+        end
+
+        totalItems = totalItems + deviceItems
+        totalTypes = totalTypes + deviceTypes
+
+        table.insert(details, {
+            category = "storage",
+            source = entry.name,
+            text = string.format("%s: %s Items (%d Typen)", entry.name, humanize(deviceItems), deviceTypes),
+        })
+
+        -- Item-Disk-Auslastung (falls die Bridge das meldet).
+        local maxDisk = extractNumericStat(device, { "getMaxItemDiskStorage", "getMaxItemExternalStorage" })
+        if maxDisk and maxDisk > 0 then
+            local percent = math.floor((deviceItems / maxDisk) * 100)
             table.insert(details, {
                 category = "storage",
                 source = entry.name,
-                text = string.format("%s: %d Eintraege", entry.name, count),
+                text = string.format("%s Speicher: %s / %s (%d%%)", entry.name, humanize(deviceItems), humanize(maxDisk), percent),
+                percent = percent,
+            })
+        end
+
+        -- Energie des RS/ME-Systems (falls die Bridge das meldet).
+        local eStored = extractNumericStat(device, { "getEnergyStorage", "getStoredEnergy", "getEnergy" })
+        local eMax = extractNumericStat(device, { "getMaxEnergyStorage", "getMaxEnergy" })
+        if eStored and eMax and eMax > 0 then
+            local percent = math.floor((eStored / eMax) * 100)
+            table.insert(details, {
+                category = "storage",
+                source = entry.name,
+                text = string.format("%s Energie: %s / %s FE (%d%%)", entry.name, humanize(eStored), humanize(eMax), percent),
+                percent = percent,
             })
         end
     end
@@ -274,8 +323,9 @@ local function getME()
     end
 
     local summary = {
-        count = totalCount,
-        items = totalCount,
+        count = totalItems,
+        items = totalItems,
+        types = totalTypes,
         sources = #devices,
     }
 
