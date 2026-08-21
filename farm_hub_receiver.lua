@@ -10,6 +10,7 @@ local colors = colors
 local textutils = textutils
 local term = term
 local window = window
+local sleep = sleep
 
 local cfg = {
     protocol = "network_status_v1",
@@ -499,10 +500,24 @@ local function render()
     width = width or 51
     height = height or 19
 
-    if hub.view == "detail" and hub.selectedID ~= nil then
-        renderDetail(canvas, width, height)
-    else
-        renderOverview(canvas, width, height)
+    -- Zeichnen wird abgesichert: stürzt renderOverview/renderDetail aus irgendeinem
+    -- Grund ab, würde der Canvas sonst für immer unsichtbar/leer bleiben (setVisible
+    -- true würde nie erreicht) - der Monitor "rendert dann nichts mehr". Stattdessen
+    -- wird der Fehler angezeigt und der Canvas trotzdem sichtbar geschaltet.
+    local ok, err = pcall(function()
+        if hub.view == "detail" and hub.selectedID ~= nil then
+            renderDetail(canvas, width, height)
+        else
+            renderOverview(canvas, width, height)
+        end
+    end)
+
+    if not ok then
+        callSelf(canvas, "setBackgroundColor", colors.black)
+        callSelf(canvas, "setCursorPos", 1, 1)
+        callSelf(canvas, "setTextColor", colors.red)
+        callSelf(canvas, "write", trim("Render-Fehler: " .. tostring(err), width))
+        print("[HUB] Fehler beim Rendern: " .. tostring(err))
     end
 
     callSelf(canvas, "setVisible", true)
@@ -640,4 +655,15 @@ local function main()
     eventLoop()
 end
 
-main()
+-- Falls doch irgendwo ein unerwarteter Fehler auftritt (z. B. defektes Peripheriegerät,
+-- Modem kurz weg o. Ä.), soll der Hub NICHT komplett stehen bleiben und der Monitor
+-- dauerhaft leer/eingefroren sein, sondern sich automatisch neu starten.
+while true do
+    local ok, err = pcall(main)
+    if ok then
+        break
+    end
+    print("[HUB] Unerwarteter Fehler: " .. tostring(err))
+    print("[HUB] Starte in 3 Sekunden neu...")
+    sleep(3)
+end
