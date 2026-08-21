@@ -61,16 +61,22 @@ end
 local function ensureModem()
     local modem = wrapPeripheral("modem")
     if not modem then
-        print("[HUB] Kein Rednet-Modem gefunden.")
+        print("[HUB] Kein Rednet-Modem gefunden. Prüfe, ob ein Wireless-/Ender-Modem am Computer hängt (bei Wired Modems: Rechtsklick zum Aktivieren).")
         return false
     end
 
+    local actualSide = peripheral.getName and peripheral.getName(modem) or cfg.modemSide
+
     if rednet and rednet.open then
-        local ok, err = pcall(rednet.open, cfg.modemSide)
+        if rednet.isOpen and rednet.isOpen(actualSide) then
+            return true
+        end
+        local ok, err = pcall(rednet.open, actualSide)
         if not ok then
-            print("[HUB] Modem konnte nicht geöffnet werden: " .. tostring(err))
+            print("[HUB] Modem konnte nicht geöffnet werden (Seite " .. tostring(actualSide) .. "): " .. tostring(err))
             return false
         end
+        print("[HUB] Modem gefunden und geöffnet auf Seite: " .. tostring(actualSide))
     end
 
     return true
