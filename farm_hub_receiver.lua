@@ -63,16 +63,21 @@ end
 -- Ruft eine Methode eines "self"-basierten Objekts auf (z. B. ein window-Objekt aus
 -- window.create() - im Gegensatz zu Peripherals erwarten diese das Objekt selbst als
 -- ersten Parameter, genau wie bei einem klassischen obj:method()-Aufruf).
+-- Wird ausschliesslich fuer den Anzeigepuffer (Canvas) verwendet - schlaegt ein Aufruf
+-- fehl, wird das laut protokolliert, statt den Monitor stillschweigend leer zu lassen.
 local function callSelf(obj, method, ...)
     if type(obj) ~= "table" then
+        print("[HUB] Anzeige-Fehler: kein gueltiger Anzeigepuffer (Methode " .. tostring(method) .. ")")
         return nil
     end
     local fn = obj[method]
     if type(fn) ~= "function" then
+        print("[HUB] Anzeige-Fehler: Methode nicht gefunden: " .. tostring(method))
         return nil
     end
     local ok, a, b = pcall(fn, obj, ...)
     if not ok then
+        print("[HUB] Anzeige-Fehler bei " .. tostring(method) .. ": " .. tostring(a))
         return nil
     end
     return a, b
@@ -128,10 +133,12 @@ local function createCanvas()
     height = height or 19
 
     local ok, win = pcall(window.create, parent, 1, 1, width, height, false)
-    if ok then
+    if ok and type(win) == "table" then
         hub.canvas = win
+        print(string.format("[HUB] Anzeigepuffer erstellt: %dx%d (Ziel: %s)", width, height, hub.monitor and ("Monitor/" .. tostring(hub.monitorSide)) or "eigener Bildschirm"))
     else
         hub.canvas = nil
+        print("[HUB] FEHLER beim Erstellen des Anzeigepuffers: " .. tostring(win))
     end
 end
 
@@ -534,6 +541,7 @@ local function render()
     end
     local canvas = hub.canvas
     if not canvas then
+        print("[HUB] Kein Anzeigepuffer vorhanden - Rendering uebersprungen.")
         return
     end
 
