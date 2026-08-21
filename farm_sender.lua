@@ -30,13 +30,13 @@ end
 -- normalizeTypeName() keine Rolle (z. B. passt "energy_cube" auf "energyCube").
 local TYPE_CATEGORIES = {
     energy = {
-        "energyDetector", "energyStorage", "energy_storage", "capacitor", "capacitorBank",
+        "energyDetector", "energy_detector", "energyStorage", "energy_storage", "capacitor", "capacitorBank",
         "battery", "rfStorage", "energyCube", "energyCell", "inductionPort", "inductionMatrix",
         "powahCell", "reactorPort", "reactorChassis", "creativeCell", "basicCapacitorBank",
     },
     storage = {
-        "meBridge", "ae2", "meBridgeProxy", "meController", "refinedStorage", "rsBridge",
-        "storageBridge", "rsController", "diskDrive",
+        "meBridge", "me_bridge", "ae2", "meBridgeProxy", "meController", "refinedStorage",
+        "rsBridge", "rs_bridge", "storageBridge", "rsController", "diskDrive",
     },
     fluid = {
         "tank", "fluidStorage", "fluid_storage", "liquidTank", "dynamicTank", "barrel",
@@ -221,6 +221,7 @@ local function getEnergy()
 
     local totalStored, totalCapacity = 0, 0
     local details = {}
+    local counted = 0
 
     for _, entry in ipairs(devices) do
         local device = entry.device
@@ -228,27 +229,41 @@ local function getEnergy()
         local capacity = extractNumericStat(device, ENERGY_CAPACITY_GETTERS)
 
         if stored ~= nil and capacity ~= nil and capacity > 0 then
+            -- Klassischer Energiespeicher (Zelle, Akku, Induktionsmatrix, ...).
             totalStored = totalStored + stored
             totalCapacity = totalCapacity + capacity
+            counted = counted + 1
             local percent = math.floor((stored / capacity) * 100)
             table.insert(details, {
                 category = "energy",
                 source = entry.name,
-                text = string.format("%s: %d/%d FE (%d%%)", entry.name, stored, capacity, percent),
+                text = string.format("%s: %s / %s FE (%d%%)", entry.name, humanize(stored), humanize(capacity), percent),
                 percent = percent,
             })
+        else
+            -- Advanced Peripherals Energy Detector: kein Speicher, sondern
+            -- Durchfluss. getTransferRate() -> aktueller FE/t-Durchsatz.
+            local rate = extractNumericStat(device, { "getTransferRate" })
+            if rate ~= nil then
+                table.insert(details, {
+                    category = "energy",
+                    source = entry.name,
+                    text = string.format("%s: %s FE/t Durchsatz", entry.name, humanize(rate)),
+                })
+            end
         end
     end
 
-    if totalCapacity <= 0 then
+    if #details == 0 then
         return nil, nil
     end
 
+    -- Nur echte Speicher liefern eine sinnvolle Prozent-Gesamtanzeige.
     local summary = {
         stored = totalStored,
         capacity = totalCapacity,
-        percent = math.floor((totalStored / totalCapacity) * 100),
-        sources = #devices,
+        percent = (totalCapacity > 0) and math.floor((totalStored / totalCapacity) * 100) or nil,
+        sources = counted,
     }
 
     return summary, details
@@ -292,19 +307,71 @@ local function getME()
             text = string.format("%s: %s Items (%d Typen)", entry.name, humanize(deviceItems), deviceTypes),
         })
 
-        -- Item-Disk-Auslastung (falls die Bridge das meldet).
-        local maxDisk = extractNumericStat(device, { "getMaxItemDiskStorage", "getMaxItemExternalStorage" })
-        if maxDisk and maxDisk > 0 then
-            local percent = math.floor((deviceItems / maxDisk) * 100)
+        -- Item-Speicher-Auslastung:
+        --  ME Bridge : getUsedItemStorage / getTotalItemStorage (Bytes).
+        --  RS Bridge : belegte Items / getMaxItemDiskStorage.
+        local usedItem  = extractNumericStat(device, { "getUsedItemStorage" })
+        local totalItem = extractNumericStat(device, { "getTotalItemStorage" })
+        if usedItem and totalItem and totalItem > 0 then
+            local percent = math.floor((usedItem / totalItem) * 100)
             table.insert(details, {
                 category = "storage",
                 source = entry.name,
-                text = string.format("%s Speicher: %s / %s (%d%%)", entry.name, humanize(deviceItems), humanize(maxDisk), percent),
+                text = string.format("%s Speicher: %s / %s Bytes (%d%%)", entry.name, humanize(usedItem), humanize(totalItem), percent),
                 percent = percent,
             })
+        else
+            local maxDisk = extractNumericStat(device, { "getMaxItemDiskStorage", "getMaxItemExternalStorage" })
+            if maxDisk and maxDisk > 0 then
+                local percent = math.floor((deviceItems / maxDisk) * 100)
+                table.insert(details, {
+                    category = "storage",
+                    source = entry.name,
+                    text = string.format("%s Speicher: %s / %s (%d%%)", entry.name, humanize(deviceItems), humanize(maxDisk), percent),
+                    percent = percent,
+                })
+            end
         end
 
-        -- Energie des RS/ME-Systems (falls die Bridge das meldet).
+        -- Fluids der Bridge: ME nutzt listFluid() (Singular), RS listFluids() (Plural).
+        local fluids = call(device, "listFluid") or call(device, "listFluids")
+        if type(fluids) == "table" then
+            local fAmount, fTypes = 0, 0
+            for _, f in pairs(fluids) do
+                if type(f) == "table" then
+                    fTypes = fTypes + 1
+                    fAmount = fAmount + (tonumber(f.amount) or tonumber(f.count) or 0)
+                end
+            end
+            if fTypes > 0 then
+                table.insert(details, {
+                    category = "storage",
+                    source = entry.name,
+                    text = string.format("%s Fluids: %s mB (%d Typen)", entry.name, humanize(fAmount), fTypes),
+                })
+            end
+        end
+
+        -- Crafting-CPUs (ME Bridge): Anzahl + wie viele gerade beschaeftigt sind.
+        local cpus = call(device, "getCraftingCPUs")
+        if type(cpus) == "table" then
+            local total, busy = 0, 0
+            for _, cpu in pairs(cpus) do
+                if type(cpu) == "table" then
+                    total = total + 1
+                    if cpu.isBusy then busy = busy + 1 end
+                end
+            end
+            if total > 0 then
+                table.insert(details, {
+                    category = "storage",
+                    source = entry.name,
+                    text = string.format("%s CPUs: %d/%d beschaeftigt", entry.name, busy, total),
+                })
+            end
+        end
+
+        -- Energie des RS/ME-Systems (RS in FE, ME in AE).
         local eStored = extractNumericStat(device, { "getEnergyStorage", "getStoredEnergy", "getEnergy" })
         local eMax = extractNumericStat(device, { "getMaxEnergyStorage", "getMaxEnergy" })
         if eStored and eMax and eMax > 0 then
@@ -312,7 +379,7 @@ local function getME()
             table.insert(details, {
                 category = "storage",
                 source = entry.name,
-                text = string.format("%s Energie: %s / %s FE (%d%%)", entry.name, humanize(eStored), humanize(eMax), percent),
+                text = string.format("%s Energie: %s / %s (%d%%)", entry.name, humanize(eStored), humanize(eMax), percent),
                 percent = percent,
             })
         end
@@ -353,7 +420,7 @@ local function getFluid()
             table.insert(details, {
                 category = "fluid",
                 source = entry.name,
-                text = string.format("%s: %d/%d mB (%d%%)", entry.name, stored, capacity, percent),
+                text = string.format("%s: %s / %s mB (%d%%)", entry.name, humanize(stored), humanize(capacity), percent),
                 percent = percent,
             })
         end
@@ -559,7 +626,7 @@ local function sendPacket()
 end
 
 local function main()
-    print("[SENDER] Version 3.0 startet...")
+    print("[SENDER] Version 3.1 startet...")
     waitForModem()
     reportPeripheralChanges()
 
