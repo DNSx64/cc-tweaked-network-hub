@@ -20,14 +20,34 @@ local state = {
     modemSide = nil,
 }
 
+local function normalizeTypeName(value)
+    return tostring(value or ""):lower():gsub("[^%a]", "")
+end
+
 local function findPeripheral(name)
     if type(name) ~= "string" then
         return nil
     end
+
     local found = peripheral.find(name)
     if found and type(found) == "table" then
         return found
     end
+
+    -- Fallback: manche Mods registrieren ihren Peripherie-Typ mit abweichender
+    -- Gro\u00df-/Kleinschreibung oder Unterstrichen (z. B. "energy_detector" statt
+    -- "energyDetector"). Deshalb zus\u00e4tzlich normalisiert nach Typ suchen.
+    local target = normalizeTypeName(name)
+    for _, peripheralName in ipairs(peripheral.getNames()) do
+        local ptype = peripheral.getType(peripheralName)
+        if ptype and normalizeTypeName(ptype) == target then
+            local ok, wrapped = pcall(peripheral.wrap, peripheralName)
+            if ok and type(wrapped) == "table" then
+                return wrapped
+            end
+        end
+    end
+
     return nil
 end
 
