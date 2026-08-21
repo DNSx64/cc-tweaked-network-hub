@@ -18,11 +18,23 @@ local cfg = {
 
 local state = {
     modemSide = nil,
+    knownPeripherals = {},
 }
 
 local function normalizeTypeName(value)
     return tostring(value or ""):lower():gsub("[^%a]", "")
 end
+
+-- Bekannte Peripherie-Typen pro Kategorie. Neue Geräte-Typen können hier einfach
+-- ergänzt werden. Groß-/Kleinschreibung und Unterstriche spielen dank
+-- normalizeTypeName() keine Rolle (z. B. passt "energy_cube" auf "energyCube").
+local TYPE_CATEGORIES = {
+    energy = { "energyDetector", "energyStorage", "capacitor", "battery", "rfStorage", "energyCube", "energyCell", "inductionPort" },
+    storage = { "meBridge", "ae2", "meBridgeProxy", "refinedStorage", "rsBridge", "storageBridge" },
+    fluid = { "tank", "fluidStorage", "liquidTank", "dynamicTank", "barrel", "thermalTank" },
+    inventory = { "chest", "inventory", "supply", "crate" },
+    machine = { "machine", "furnace", "assembler", "crusher", "sawmill" },
+}
 
 local function findPeripheral(name)
     if type(name) ~= "string" then
@@ -35,10 +47,9 @@ local function findPeripheral(name)
     end
 
     -- Fallback: manche Mods registrieren ihren Peripherie-Typ mit abweichender
-    -- Groß-/Kleinschreibung oder Unterstrichen (z. B. "energy_detector" statt
-    -- "energyDetector"). Zusätzlich kann ein "Generic Peripheral" laut CC:Tweaked-API
-    -- MEHRERE Typen gleichzeitig melden (peripheral.getType gibt dann mehrere Werte
-    -- zurück) - deshalb werden hier alle gemeldeten Typen geprüft, nicht nur der erste.
+    -- Groß-/Kleinschreibung oder Unterstrichen. Zusätzlich kann ein "Generic
+    -- Peripheral" laut CC:Tweaked-API MEHRERE Typen gleichzeitig melden - deshalb
+    -- werden hier alle gemeldeten Typen geprüft, nicht nur der erste.
     local target = normalizeTypeName(name)
     for _, peripheralName in ipairs(peripheral.getNames()) do
         local types = table.pack(peripheral.getType(peripheralName))
@@ -54,6 +65,69 @@ local function findPeripheral(name)
     end
 
     return nil
+end
+
+-- Ordnet ein Peripheriegerät anhand seiner gemeldeten Typen einer Kategorie zu.
+-- Gibt Kategorie + Rohtyp (für Log-Ausgaben) zurück, oder nil, wenn unbekannt.
+local function classifyPeripheral(peripheralName)
+    local types = table.pack(peripheral.getType(peripheralName))
+    for i = 1, types.n do
+        local normalized = normalizeTypeName(types[i])
+        for category, candidates in pairs(TYPE_CATEGORIES) do
+            for _, candidate in ipairs(candidates) do
+                if normalized == normalizeTypeName(candidate) then
+                    return category, types[i]
+                end
+            end
+        end
+    end
+    return nil, types[1]
+end
+
+-- Liefert ALLE aktuell angeschlossenen Peripheriegeräte einer Kategorie (nicht nur
+-- das erste gefundene), damit z. B. mehrere Energiezellen zusammen gezählt werden.
+local function findAllByCategory(category)
+    local matches = {}
+    for _, peripheralName in ipairs(peripheral.getNames()) do
+        local matchedCategory = classifyPeripheral(peripheralName)
+        if matchedCategory == category then
+            local ok, wrapped = pcall(peripheral.wrap, peripheralName)
+            if ok and type(wrapped) == "table" then
+                table.insert(matches, { name = peripheralName, device = wrapped })
+            end
+        end
+    end
+    return matches
+end
+
+-- Scannt alle angeschlossenen Peripheriegeräte und meldet neu hinzugekommene bzw.
+-- entfernte Geräte im Terminal, inklusive erkannter Kategorie (z. B.
+-- "energy_cube_1 (energy_cube) -> Kategorie: energy"). Läuft bei jedem Zyklus mit,
+-- daher werden Hotplug-Änderungen live erkannt und protokolliert.
+local function reportPeripheralChanges()
+    local current = {}
+
+    for _, peripheralName in ipairs(peripheral.getNames()) do
+        current[peripheralName] = true
+        if not state.knownPeripherals[peripheralName] then
+            local category, rawType = classifyPeripheral(peripheralName)
+            if normalizeTypeName(rawType) ~= "modem" then
+                if category then
+                    print("[SENDER] Erkannt: " .. peripheralName .. " (" .. tostring(rawType) .. ") -> Kategorie: " .. category)
+                else
+                    print("[SENDER] Gefunden (nicht kategorisiert): " .. peripheralName .. " (" .. tostring(rawType) .. ")")
+                end
+            end
+        end
+    end
+
+    for peripheralName in pairs(state.knownPeripherals) do
+        if not current[peripheralName] then
+            print("[SENDER] Entfernt: " .. peripheralName)
+        end
+    end
+
+    state.knownPeripherals = current
 end
 
 -- Ruft eine Peripherie-Methode sicher auf, OHNE das Objekt selbst als extra
@@ -84,131 +158,159 @@ local function countTable(value)
     return count
 end
 
-local function getEnergy(device)
-    if not device then
+local function getEnergy()
+    local devices = findAllByCategory("energy")
+    if #devices == 0 then
         return nil
     end
 
-    local stored = call(device, "getEnergyStored")
-        or call(device, "getStoredEnergy")
-        or call(device, "getEnergyLevel")
-        or call(device, "getEnergy")
-        or call(device, "getStored")
+    local totalStored, totalCapacity = 0, 0
+    local any = false
 
-    local capacity = call(device, "getMaxEnergyStored")
-        or call(device, "getCapacity")
-        or call(device, "getMaxEnergy")
-        or call(device, "getMaxStored")
-        or call(device, "getEnergyCapacity")
+    for _, entry in ipairs(devices) do
+        local device = entry.device
+        local stored = call(device, "getEnergyStored")
+            or call(device, "getStoredEnergy")
+            or call(device, "getEnergyLevel")
+            or call(device, "getEnergy")
+            or call(device, "getStored")
 
-    if stored == nil or capacity == nil then
-        return nil
+        local capacity = call(device, "getMaxEnergyStored")
+            or call(device, "getCapacity")
+            or call(device, "getMaxEnergy")
+            or call(device, "getMaxStored")
+            or call(device, "getEnergyCapacity")
+
+        if stored ~= nil and capacity ~= nil then
+            totalStored = totalStored + (tonumber(stored) or 0)
+            totalCapacity = totalCapacity + (tonumber(capacity) or 0)
+            any = true
+        end
     end
 
-    stored = tonumber(stored) or 0
-    capacity = tonumber(capacity) or 0
-    if capacity <= 0 then
-        return nil
-    end
-
-    return {
-        stored = stored,
-        capacity = capacity,
-        percent = math.floor((stored / capacity) * 100),
-    }
-end
-
-local function getME(device)
-    if not device then
-        return nil
-    end
-
-    local items = call(device, "getItems")
-        or call(device, "listItems")
-        or call(device, "getItemList")
-        or call(device, "getAvailableItems")
-
-    local count = 0
-    if type(items) == "table" then
-        count = countTable(items)
-    end
-
-    return {
-        count = count,
-        items = count,
-    }
-end
-
-local function getFluid(device)
-    if not device then
-        return nil
-    end
-
-    local stored = call(device, "getFluidAmount")
-        or call(device, "getAmount")
-        or call(device, "getStored")
-
-    local capacity = call(device, "getCapacity")
-        or call(device, "getMaxAmount")
-        or call(device, "getMaxStored")
-
-    if stored == nil or capacity == nil then
-        return nil
-    end
-
-    stored = tonumber(stored) or 0
-    capacity = tonumber(capacity) or 0
-    if capacity <= 0 then
+    if not any or totalCapacity <= 0 then
         return nil
     end
 
     return {
-        stored = stored,
-        capacity = capacity,
-        percent = math.floor((stored / capacity) * 100),
+        stored = totalStored,
+        capacity = totalCapacity,
+        percent = math.floor((totalStored / totalCapacity) * 100),
+        sources = #devices,
     }
 end
 
-local function getInventory(device)
-    if not device then
+local function getME()
+    local devices = findAllByCategory("storage")
+    if #devices == 0 then
         return nil
     end
 
-    local items = call(device, "list")
-        or call(device, "getItems")
-        or call(device, "getAllItems")
+    local totalCount = 0
+    for _, entry in ipairs(devices) do
+        local items = call(entry.device, "getItems")
+            or call(entry.device, "listItems")
+            or call(entry.device, "getItemList")
+            or call(entry.device, "getAvailableItems")
 
-    if type(items) ~= "table" then
+        if type(items) == "table" then
+            totalCount = totalCount + countTable(items)
+        end
+    end
+
+    return {
+        count = totalCount,
+        items = totalCount,
+        sources = #devices,
+    }
+end
+
+local function getFluid()
+    local devices = findAllByCategory("fluid")
+    if #devices == 0 then
+        return nil
+    end
+
+    local totalStored, totalCapacity = 0, 0
+    local any = false
+
+    for _, entry in ipairs(devices) do
+        local device = entry.device
+        local stored = call(device, "getFluidAmount")
+            or call(device, "getAmount")
+            or call(device, "getStored")
+
+        local capacity = call(device, "getCapacity")
+            or call(device, "getMaxAmount")
+            or call(device, "getMaxStored")
+
+        if stored ~= nil and capacity ~= nil then
+            totalStored = totalStored + (tonumber(stored) or 0)
+            totalCapacity = totalCapacity + (tonumber(capacity) or 0)
+            any = true
+        end
+    end
+
+    if not any or totalCapacity <= 0 then
         return nil
     end
 
     return {
-        count = countTable(items),
-        items = items,
+        stored = totalStored,
+        capacity = totalCapacity,
+        percent = math.floor((totalStored / totalCapacity) * 100),
+        sources = #devices,
     }
 end
 
-local function getMachineState(device)
-    if not device then
+local function getInventory()
+    local devices = findAllByCategory("inventory")
+    if #devices == 0 then
+        return nil
+    end
+
+    local totalCount = 0
+    for _, entry in ipairs(devices) do
+        local items = call(entry.device, "list")
+            or call(entry.device, "getItems")
+            or call(entry.device, "getAllItems")
+
+        if type(items) == "table" then
+            totalCount = totalCount + countTable(items)
+        end
+    end
+
+    return {
+        count = totalCount,
+        sources = #devices,
+    }
+end
+
+local function getMachineState()
+    local devices = findAllByCategory("machine")
+    if #devices == 0 then
         return "N/A"
     end
 
-    local status = call(device, "getStatus")
-        or call(device, "getMachineStatus")
-        or call(device, "getState")
-        or call(device, "isRunning")
+    for _, entry in ipairs(devices) do
+        local device = entry.device
+        local status = call(device, "getStatus")
+            or call(device, "getMachineStatus")
+            or call(device, "getState")
+            or call(device, "isRunning")
 
-    if type(status) == "boolean" then
-        return status and "RUNNING" or "IDLE"
-    end
+        if type(status) == "boolean" then
+            return status and "RUNNING" or "IDLE"
+        end
 
-    if type(status) == "string" then
-        return status
-    end
+        if type(status) == "string" then
+            return status
+        end
 
-    local active = call(device, "isActive")
-    if type(active) == "boolean" then
-        return active and "ACTIVE" or "IDLE"
+        local active = call(device, "isActive")
+        if type(active) == "boolean" then
+            return active and "ACTIVE" or "IDLE"
+        end
     end
 
     return "OK"
@@ -229,44 +331,11 @@ local function collectStatus()
         machineStatus = "OK",
     }
 
-    local energyDevice = findPeripheral("energyDetector")
-        or findPeripheral("energyStorage")
-        or findPeripheral("capacitor")
-        or findPeripheral("battery")
-        or findPeripheral("rfStorage")
-        or findPeripheral("mekanism:energyCube")
-        or findPeripheral("inductionPort")
-
-    local meDevice = findPeripheral("meBridge")
-        or findPeripheral("ae2")
-        or findPeripheral("meBridgeProxy")
-        or findPeripheral("refinedStorage")
-        or findPeripheral("rsBridge")
-        or findPeripheral("storageBridge")
-
-    local fluidDevice = findPeripheral("tank")
-        or findPeripheral("fluidStorage")
-        or findPeripheral("liquidTank")
-        or findPeripheral("dynamicTank")
-        or findPeripheral("barrel")
-        or findPeripheral("thermalTank")
-
-    local inventoryDevice = findPeripheral("chest")
-        or findPeripheral("inventory")
-        or findPeripheral("supply")
-        or findPeripheral("crate")
-
-    local machineDevice = findPeripheral("machine")
-        or findPeripheral("furnace")
-        or findPeripheral("assembler")
-        or findPeripheral("crusher")
-        or findPeripheral("sawmill")
-
-    payload.energy = getEnergy(energyDevice)
-    payload.me = getME(meDevice)
-    payload.fluid = getFluid(fluidDevice)
-    payload.inventory = getInventory(inventoryDevice)
-    payload.machineStatus = getMachineState(machineDevice)
+    payload.energy = getEnergy()
+    payload.me = getME()
+    payload.fluid = getFluid()
+    payload.inventory = getInventory()
+    payload.machineStatus = getMachineState()
 
     if payload.energy and payload.energy.capacity > 0 then
         payload.status = (payload.energy.percent >= 25) and "OK" or "LOW_ENERGY"
@@ -327,9 +396,11 @@ end
 
 local function main()
     waitForModem()
+    reportPeripheralChanges()
 
     while true do
         ensureModem()
+        reportPeripheralChanges()
 
         local ok, err = pcall(sendPacket)
         if not ok then
