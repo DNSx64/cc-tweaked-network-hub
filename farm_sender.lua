@@ -190,6 +190,49 @@ local function humanize(n)
     return tostring(math.floor(n + 0.5))
 end
 
+-- Registry-Namen huebsch machen: "minecraft:white_concrete" -> "White_Concrete".
+local function prettifyItemName(id)
+    id = tostring(id or "?")
+    local afterColon = id:match(":(.+)$") or id
+    local parts = {}
+    for word in afterColon:gmatch("[^_]+") do
+        parts[#parts + 1] = word:sub(1, 1):upper() .. word:sub(2)
+    end
+    if #parts == 0 then return afterColon end
+    return table.concat(parts, "_")
+end
+
+-- Baut aus einer rohen Item-Liste (listItems()/list()) eine kompakte, nach Menge
+-- sortierte Liste { {name=Anzeigename, count=Anzahl}, ... } fuers Detail-Fenster.
+-- Wird bei sehr vielen Typen (z. B. grosses ME-System) begrenzt, damit die
+-- Rednet-Nachricht nicht zu gross wird.
+local MAX_ITEM_ENTRIES = 300
+local function buildItemList(rawItems)
+    local list = {}
+    if type(rawItems) ~= "table" then
+        return list
+    end
+    for _, item in pairs(rawItems) do
+        if type(item) == "table" then
+            local count = tonumber(item.count) or tonumber(item.amount) or 0
+            if count > 0 then
+                local name = item.displayName
+                if type(name) ~= "string" or name == "" then
+                    name = prettifyItemName(item.name or item.technicalName or "?")
+                end
+                list[#list + 1] = { name = name, count = count }
+            end
+        end
+    end
+    table.sort(list, function(a, b) return a.count > b.count end)
+    if #list > MAX_ITEM_ENTRIES then
+        for i = #list, MAX_ITEM_ENTRIES + 1, -1 do
+            list[i] = nil
+        end
+    end
+    return list
+end
+
 -- Probiert nacheinander mehrere Getter-Methodennamen an einem Gerät durch (viele Mods
 -- benennen dieselbe Sache unterschiedlich) und gibt den ersten numerischen Treffer zurück.
 local function extractNumericStat(device, getters)
@@ -305,6 +348,7 @@ local function getME()
             category = "storage",
             source = entry.name,
             text = string.format("%s: %s Items (%d Typen)", entry.name, humanize(deviceItems), deviceTypes),
+            items = buildItemList(items),
         })
 
         -- Item-Speicher-Auslastung:
@@ -485,6 +529,7 @@ local function getInventory()
             source = entry.name,
             text = string.format("%s: %s Items (%s)", entry.name, humanize(deviceItems), slotInfo),
             percent = (totalSlots and totalSlots > 0) and math.floor((usedSlots / totalSlots) * 100) or nil,
+            items = buildItemList(items),
         })
 
         -- Fluids (z. B. Functional Storage Fluid-Drawer): tanks() -> Liste mit
@@ -677,7 +722,7 @@ local function sendPacket()
 end
 
 local function main()
-    print("[SENDER] Version 3.2 startet...")
+    print("[SENDER] Version 3.3 startet...")
     waitForModem()
     reportPeripheralChanges()
 

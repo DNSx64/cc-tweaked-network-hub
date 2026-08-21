@@ -13,7 +13,7 @@
 --  obj.method(args) - NICHT obj:method(args) und NICHT obj.method(obj, args).
 -- ============================================================================
 
-local SCRIPT_VERSION = "3.0"
+local SCRIPT_VERSION = "3.3"
 
 local peripheral = peripheral
 local rednet      = rednet
@@ -37,12 +37,16 @@ local hub = {
     modemSide    = nil,
     senders      = {},        -- [rednetID] = { data = <payload>, lastSeen = os.clock() }
     canvas       = nil,       -- window-Objekt (Doppelpuffer gegen Flackern)
-    view         = "overview",-- "overview" | "detail"
+    view         = "overview",-- "overview" | "detail" | "items"
     selectedID   = nil,
+    selectedSource = nil,     -- Geraetename fuer die Item-Ansicht
     rowRects     = {},        -- [rednetID] = y-Zeile (fuer Touch-Trefferpruefung)
     detailScroll = 0,
     detailMaxScroll = 0,
     lastDetailVisibleRows = 10,
+    detailDeviceRects = {},   -- [y] = source (anklickbare Geraetezeile im Detail)
+    itemScroll   = 0,
+    itemMaxScroll = 0,
 }
 
 -- ---------------------------------------------------------------------------
@@ -115,6 +119,16 @@ local function humanize(n)
     if a >= 1e6  then return string.format("%.1fM", n / 1e6)  end
     if a >= 1e3  then return string.format("%.1fK", n / 1e3)  end
     return tostring(math.floor(n + 0.5))
+end
+
+-- Ganze Zahl mit Tausenderpunkten, z. B. 2048 -> "2.048".
+local function formatThousands(n)
+    n = math.floor(tonumber(n) or 0)
+    local sign = n < 0 and "-" or ""
+    local s = tostring(math.abs(n))
+    local out = s:reverse():gsub("(%d%d%d)", "%1."):reverse()
+    out = out:gsub("^%.", "")
+    return sign .. out
 end
 
 local function safeString(value, fallback)
@@ -321,7 +335,12 @@ local function buildDetailLines(data)
         if items and #items > 0 then
             table.insert(lines, { header = true, text = headers[category] or category:upper() })
             for _, item in ipairs(items) do
-                table.insert(lines, { text = item.text, percent = item.percent })
+                table.insert(lines, {
+                    text = item.text,
+                    percent = item.percent,
+                    items = item.items,   -- vorhanden -> Zeile ist anklickbar
+                    source = item.source,
+                })
             end
         end
     end
@@ -458,6 +477,7 @@ local function renderDetail(c, width, height)
 
     local y        = top
     local barWidth = math.max(5, math.min(width, 30))
+    hub.detailDeviceRects = {}
 
     for i = 1 + hub.detailScroll, #lines do
         if y > bottom then break end
@@ -467,7 +487,15 @@ local function renderDetail(c, width, height)
             writeAt(c, 1, y, trim("-- " .. line.text .. " --", width), colors.orange, colors.black)
             y = y + 1
         else
-            writeAt(c, 1, y, trim(line.text, width), colors.lightGray, colors.black)
+            local clickable = type(line.items) == "table" and #line.items > 0 and line.source
+            if clickable then
+                -- Anklickbare Geraetezeile: Pfeil + hellere Farbe.
+                hub.detailDeviceRects[y] = line.source
+                writeAt(c, 1, y, "> ", colors.cyan, colors.black)
+                writeAt(c, 3, y, trim(line.text, math.max(1, width - 2)), colors.white, colors.black)
+            else
+                writeAt(c, 1, y, trim(line.text, width), colors.lightGray, colors.black)
+            end
             y = y + 1
             if line.percent and y <= bottom then
                 local barColor = colors.green
@@ -494,7 +522,71 @@ local function renderDetail(c, width, height)
         if hub.detailScroll < hub.detailMaxScroll then table.insert(hint, "v unten") end
         if #hint > 0 then table.insert(footerParts, table.concat(hint, " / ")) end
     end
+    if next(hub.detailDeviceRects) ~= nil then
+        table.insert(footerParts, "Geraet (>) antippen fuer Items")
+    end
     writeAt(c, 1, height, trim(table.concat(footerParts, "  |  "), width), colors.cyan, colors.black)
+end
+
+-- Sucht im aktuellen Node die Detailzeile eines Geraets (per Name) und liefert
+-- deren aktuelle Item-Liste zurueck (live, damit sich Mengen mit aktualisieren).
+local function findDeviceItems(data, source)
+    if type(data) ~= "table" then return nil end
+    for _, item in ipairs(data.details or {}) do
+        if item.source == source and type(item.items) == "table" then
+            return item.items
+        end
+    end
+    return nil
+end
+
+-- Item-Ansicht: zeigt ALLE Items eines Geraets numerisch, z. B.
+--   [White_Concrete] = 2.048
+local function renderItems(c, width, height)
+    local sender = hub.senders[hub.selectedID]
+    local data   = sender and sender.data
+    local items  = data and findDeviceItems(data, hub.selectedSource)
+
+    if not items then
+        -- Geraet/Node verschwunden -> zurueck ins Detail.
+        hub.view = (hub.selectedID and hub.senders[hub.selectedID]) and "detail" or "overview"
+        render()
+        return
+    end
+
+    -- Kopf: Zurueck-Button + Geraetename.
+    fillLine(c, 1, width, colors.blue)
+    writeAt(c, 2, 1, trim("< Zurueck", width), colors.white, colors.blue)
+    c.setBackgroundColor(colors.black)
+
+    writeAt(c, 1, 2, trim(tostring(hub.selectedSource or "Geraet"), width), colors.yellow, colors.black)
+    writeAt(c, 1, 3, trim(string.format("%d Eintraege", #items), width), colors.lightGray, colors.black)
+    writeAt(c, 1, 4, string.rep("-", width), colors.gray, colors.black)
+
+    -- Scrollbarer Bereich.
+    local top     = 5
+    local bottom  = height - 1
+    local visible = math.max(1, bottom - top + 1)
+    hub.lastItemVisibleRows = visible
+    hub.itemMaxScroll = math.max(0, #items - visible)
+    hub.itemScroll    = math.max(0, math.min(hub.itemScroll or 0, hub.itemMaxScroll))
+
+    local y = top
+    for i = 1 + hub.itemScroll, #items do
+        if y > bottom then break end
+        local it   = items[i]
+        local line = string.format("[%s] = %s", tostring(it.name or "?"), formatThousands(it.count or 0))
+        writeAt(c, 1, y, trim(line, width), colors.white, colors.black)
+        y = y + 1
+    end
+
+    -- Fusszeile: Scroll-Hinweise.
+    local hint = {}
+    if hub.itemScroll > 0 then table.insert(hint, "^ oben") end
+    if hub.itemScroll < hub.itemMaxScroll then table.insert(hint, "v unten") end
+    local footer = "< oben antippen fuer zurueck"
+    if #hint > 0 then footer = footer .. "  |  " .. table.concat(hint, " / ") end
+    writeAt(c, 1, height, trim(footer, width), colors.cyan, colors.black)
 end
 
 -- ---------------------------------------------------------------------------
@@ -524,7 +616,9 @@ local function render()
     -- unsichtbar - stattdessen wird der Fehler angezeigt und trotzdem sichtbar
     -- geschaltet.
     local ok, err = pcall(function()
-        if hub.view == "detail" and hub.selectedID ~= nil then
+        if hub.view == "items" and hub.selectedID ~= nil and hub.selectedSource ~= nil then
+            renderItems(c, width, height)
+        elseif hub.view == "detail" and hub.selectedID ~= nil then
             renderDetail(c, width, height)
         else
             renderOverview(c, width, height)
@@ -557,12 +651,42 @@ local function handleTouch(x, y)
                 return
             end
         end
+    elseif hub.view == "items" then
+        -- Item-Ansicht: Zurueck (obere Zeile) oder Scrollen.
+        if y == 1 then
+            hub.view       = "detail"
+            hub.itemScroll = 0
+            render()
+            return
+        end
+
+        local contentTop = 5
+        local visible    = hub.lastItemVisibleRows or 10
+        if y >= contentTop and y <= contentTop + visible - 1 then
+            local half = contentTop + math.floor(visible / 2)
+            if y < half then
+                hub.itemScroll = math.max(0, (hub.itemScroll or 0) - 8)
+            else
+                hub.itemScroll = math.min(hub.itemMaxScroll or 0, (hub.itemScroll or 0) + 8)
+            end
+            render()
+        end
     else
-        -- Detail: Zurueck (obere Zeile) oder Scrollen per Antippen.
+        -- Detail: Zurueck (obere Zeile), Geraet antippen -> Items, sonst scrollen.
         if y == 1 then
             hub.view         = "overview"
             hub.selectedID   = nil
             hub.detailScroll = 0
+            render()
+            return
+        end
+
+        -- Wurde eine anklickbare Geraetezeile getroffen?
+        local source = hub.detailDeviceRects and hub.detailDeviceRects[y]
+        if source then
+            hub.view         = "items"
+            hub.selectedSource = source
+            hub.itemScroll   = 0
             render()
             return
         end
@@ -599,9 +723,10 @@ local function cleanupStaleSenders()
     for id, sender in pairs(hub.senders) do
         if sender and sender.lastSeen and (now - sender.lastSeen) > cfg.staleAfter then
             hub.senders[id] = nil
-            if hub.view == "detail" and hub.selectedID == id then
-                hub.view       = "overview"
-                hub.selectedID = nil
+            if (hub.view == "detail" or hub.view == "items") and hub.selectedID == id then
+                hub.view         = "overview"
+                hub.selectedID   = nil
+                hub.selectedSource = nil
             end
         end
     end
