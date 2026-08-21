@@ -9,6 +9,7 @@ local os = os
 local colors = colors
 local textutils = textutils
 local term = term
+local window = window
 
 local cfg = {
     protocol = "network_status_v1",
@@ -22,17 +23,10 @@ local hub = {
     monitorSide = nil,
     modemSide = nil,
     senders = {},
-}
-
--- Adapter, damit der eigene Computer-Bildschirm (term) dieselbe Aufruf-Konvention
--- wie ein gewrapptes Monitor-Peripheriegeärt versteht (einheitliches render()).
-local termAdapter = {
-    setBackgroundColor = function(_, c) term.setBackgroundColor(c) end,
-    setTextColor = function(_, c) term.setTextColor(c) end,
-    clear = function(_) term.clear() end,
-    setCursorPos = function(_, x, y) term.setCursorPos(x, y) end,
-    write = function(_, s) term.write(s) end,
-    getSize = function(_) return term.getSize() end,
+    canvas = nil,
+    view = "overview", -- "overview" | "detail"
+    selectedID = nil,
+    rowRects = {},
 }
 
 local function trim(value, maxLen)
@@ -62,8 +56,22 @@ local function call(obj, method, ...)
     return a, b
 end
 
-local function getScreen()
-    return hub.monitor or termAdapter
+-- Ruft eine Methode eines "self"-basierten Objekts auf (z. B. ein window-Objekt aus
+-- window.create() - im Gegensatz zu Peripherals erwarten diese das Objekt selbst als
+-- ersten Parameter, genau wie bei einem klassischen obj:method()-Aufruf).
+local function callSelf(obj, method, ...)
+    if type(obj) ~= "table" then
+        return nil
+    end
+    local fn = obj[method]
+    if type(fn) ~= "function" then
+        return nil
+    end
+    local ok, a, b = pcall(fn, obj, ...)
+    if not ok then
+        return nil
+    end
+    return a, b
 end
 
 local function normalizeTypeName(value)
@@ -95,6 +103,32 @@ local function findPeripheral(name)
     end
 
     return nil
+end
+
+-- Erstellt einen unsichtbaren Zeichenpuffer (window-API) über dem Monitor oder dem
+-- eigenen Bildschirm. Dadurch wird jeder render()-Durchlauf komplett "hinter den
+-- Kulissen" gezeichnet und erst am Ende in einem Rutsch sichtbar geschaltet - das
+-- verhindert das typische Flackern beim Neuzeichnen von Monitoren (Anti-Flicker).
+local function createCanvas()
+    local parent, width, height
+
+    if hub.monitor then
+        parent = hub.monitor
+        width, height = call(hub.monitor, "getSize")
+    else
+        parent = term.current()
+        width, height = term.getSize()
+    end
+
+    width = width or 51
+    height = height or 19
+
+    local ok, win = pcall(window.create, parent, 1, 1, width, height, false)
+    if ok then
+        hub.canvas = win
+    else
+        hub.canvas = nil
+    end
 end
 
 local function ensureModem()
@@ -144,13 +178,9 @@ local function attachMonitor()
 
     hub.monitor = mon
     hub.monitorSide = peripheral.getName and peripheral.getName(mon) or nil
-
     call(mon, "setTextScale", 0.5)
-    call(mon, "setBackgroundColor", colors.black)
-    call(mon, "clear")
-    call(mon, "setTextColor", colors.lime)
-    call(mon, "setCursorPos", 1, 1)
-    call(mon, "write", cfg.title)
+
+    createCanvas()
 
     print("[HUB] Monitor gefunden auf Seite: " .. tostring(hub.monitorSide))
     return true
@@ -195,23 +225,35 @@ local function formatFluid(val)
     return string.format("%d/%d (%d%%)", stored, capacity, math.floor((stored / capacity) * 100))
 end
 
-local function render()
-    local screen = getScreen()
+local function statusColor(status)
+    status = tostring(status or ""):upper()
+    if status == "RUNNING" or status == "ACTIVE" or status == "OK" then
+        return colors.lime
+    elseif status == "IDLE" then
+        return colors.yellow
+    elseif status == "LOW_ENERGY" then
+        return colors.orange
+    elseif status == "N/A" then
+        return colors.gray
+    end
+    return colors.red
+end
 
-    call(screen, "setBackgroundColor", colors.black)
-    call(screen, "clear")
+-- Zeichnet einen horizontalen Fortschrittsbalken (z. B. Energie-/Füllstand) in den
+-- Canvas - deutlich mehr visueller "Wumms" als reiner Text.
+local function drawBar(canvas, x, y, width, percent, filledColor, emptyColor)
+    percent = math.max(0, math.min(100, percent or 0))
+    local filled = math.floor((percent / 100) * width + 0.5)
 
-    local width, height = call(screen, "getSize")
-    width = width or 51
-    height = height or 19
+    callSelf(canvas, "setCursorPos", x, y)
+    callSelf(canvas, "setBackgroundColor", filledColor)
+    callSelf(canvas, "write", string.rep(" ", filled))
+    callSelf(canvas, "setBackgroundColor", emptyColor)
+    callSelf(canvas, "write", string.rep(" ", math.max(0, width - filled)))
+    callSelf(canvas, "setBackgroundColor", colors.black)
+end
 
-    call(screen, "setCursorPos", 1, 1)
-    call(screen, "setTextColor", colors.yellow)
-    call(screen, "write", trim(cfg.title .. "  " .. os.date("%H:%M:%S"), width))
-
-    call(screen, "setCursorPos", 1, 2)
-    call(screen, "write", string.rep("-", width))
-
+local function collectRows()
     local rows = {}
     for id, sender in pairs(hub.senders) do
         local data = sender and sender.data or nil
@@ -233,13 +275,29 @@ local function render()
         return a.id < b.id
     end)
 
+    return rows
+end
+
+local function renderOverview(canvas, width, height)
+    hub.rowRects = {}
+
+    callSelf(canvas, "setCursorPos", 1, 1)
+    callSelf(canvas, "setTextColor", colors.yellow)
+    callSelf(canvas, "write", trim(cfg.title .. "  " .. os.date("%H:%M:%S"), width))
+
+    callSelf(canvas, "setCursorPos", 1, 2)
+    callSelf(canvas, "setTextColor", colors.gray)
+    callSelf(canvas, "write", string.rep("-", width))
+
+    local rows = collectRows()
+
     local header = { "ID", "NODE", "ENERGY", "ME", "FLUID", "INV", "STAT" }
     local xPos = {1, 5, 17, 31, 36, 45, 50}
 
     for i = 1, #header do
-        call(screen, "setCursorPos", xPos[i], 3)
-        call(screen, "setTextColor", colors.white)
-        call(screen, "write", trim(header[i], 10))
+        callSelf(canvas, "setCursorPos", xPos[i], 3)
+        callSelf(canvas, "setTextColor", colors.white)
+        callSelf(canvas, "write", trim(header[i], 10))
     end
 
     local y = 4
@@ -259,25 +317,164 @@ local function render()
             row.status,
         }
 
+        local rowColor = (i % 2 == 0) and colors.gray or colors.lime
+
         for c = 1, #values do
-            call(screen, "setCursorPos", xPos[c], y)
-            call(screen, "setTextColor", (i % 2 == 0) and colors.gray or colors.lime)
-            call(screen, "write", trim(values[c], 10))
+            callSelf(canvas, "setCursorPos", xPos[c], y)
+            callSelf(canvas, "setTextColor", (c == #values) and statusColor(row.status) or rowColor)
+            callSelf(canvas, "write", trim(values[c], 10))
         end
 
+        hub.rowRects[row.id] = y
         y = y + 1
     end
 
     if #rows == 0 then
-        call(screen, "setCursorPos", 1, 5)
-        call(screen, "setTextColor", colors.yellow)
-        call(screen, "write", "Warte auf Sender...")
+        callSelf(canvas, "setCursorPos", 1, 5)
+        callSelf(canvas, "setTextColor", colors.yellow)
+        callSelf(canvas, "write", "Warte auf Sender...")
     end
 
-    call(screen, "setCursorPos", 1, height)
-    call(screen, "setTextColor", colors.cyan)
-    local suffix = hub.monitor and "" or " (Fallback: eigener Bildschirm, kein Monitor erkannt)"
-    call(screen, "write", "Live: " .. tostring(#rows) .. " sender" .. suffix)
+    callSelf(canvas, "setCursorPos", 1, height)
+    callSelf(canvas, "setTextColor", colors.cyan)
+    local suffix = hub.monitor and "" or " (Fallback: eigener Bildschirm)"
+    callSelf(canvas, "write", trim("Live: " .. tostring(#rows) .. " sender" .. suffix .. " | Zeile antippen fuer Details", width))
+end
+
+local function renderDetail(canvas, width, height)
+    local sender = hub.senders[hub.selectedID]
+    local data = sender and sender.data
+
+    if not data then
+        hub.view = "overview"
+        hub.selectedID = nil
+        renderOverview(canvas, width, height)
+        return
+    end
+
+    callSelf(canvas, "setCursorPos", 1, 1)
+    callSelf(canvas, "setTextColor", colors.cyan)
+    callSelf(canvas, "write", trim("< Zurueck", width))
+
+    callSelf(canvas, "setCursorPos", 1, 2)
+    callSelf(canvas, "setTextColor", colors.gray)
+    callSelf(canvas, "write", string.rep("-", width))
+
+    callSelf(canvas, "setCursorPos", 1, 3)
+    callSelf(canvas, "setTextColor", colors.yellow)
+    callSelf(canvas, "write", trim("Node " .. tostring(hub.selectedID) .. ": " .. tostring(data.name or "?"), width))
+
+    callSelf(canvas, "setCursorPos", 1, 4)
+    callSelf(canvas, "setTextColor", colors.white)
+    callSelf(canvas, "write", trim("Maschine: " .. safeString(data.machine, "?"), width))
+
+    local barWidth = math.max(5, math.min(width, 30))
+    local y = 6
+
+    callSelf(canvas, "setCursorPos", 1, y)
+    callSelf(canvas, "setTextColor", colors.white)
+    callSelf(canvas, "write", "Energie:")
+    if type(data.energy) == "table" and (tonumber(data.energy.capacity) or 0) > 0 then
+        drawBar(canvas, 1, y + 1, barWidth, data.energy.percent, colors.green, colors.gray)
+        callSelf(canvas, "setCursorPos", 1, y + 2)
+        callSelf(canvas, "setTextColor", colors.lightGray)
+        callSelf(canvas, "write", trim(formatEnergy(data.energy), width))
+    else
+        callSelf(canvas, "setCursorPos", 1, y + 1)
+        callSelf(canvas, "setTextColor", colors.gray)
+        callSelf(canvas, "write", "N/A")
+    end
+
+    y = y + 4
+    callSelf(canvas, "setCursorPos", 1, y)
+    callSelf(canvas, "setTextColor", colors.white)
+    callSelf(canvas, "write", trim("ME/Storage: " .. formatMe(data.me), width))
+
+    y = y + 2
+    callSelf(canvas, "setCursorPos", 1, y)
+    callSelf(canvas, "setTextColor", colors.white)
+    callSelf(canvas, "write", "Fluessigkeit:")
+    if type(data.fluid) == "table" and (tonumber(data.fluid.capacity) or 0) > 0 then
+        drawBar(canvas, 1, y + 1, barWidth, data.fluid.percent, colors.blue, colors.gray)
+        callSelf(canvas, "setCursorPos", 1, y + 2)
+        callSelf(canvas, "setTextColor", colors.lightGray)
+        callSelf(canvas, "write", trim(formatFluid(data.fluid), width))
+    else
+        callSelf(canvas, "setCursorPos", 1, y + 1)
+        callSelf(canvas, "setTextColor", colors.gray)
+        callSelf(canvas, "write", "N/A")
+    end
+
+    y = y + 4
+    callSelf(canvas, "setCursorPos", 1, y)
+    callSelf(canvas, "setTextColor", colors.white)
+    callSelf(canvas, "write", trim("Inventar: " .. formatMe(data.inventory), width))
+
+    y = y + 2
+    if y <= height then
+        callSelf(canvas, "setCursorPos", 1, y)
+        callSelf(canvas, "setTextColor", colors.white)
+        callSelf(canvas, "write", "Status: ")
+        callSelf(canvas, "setTextColor", statusColor(data.status))
+        callSelf(canvas, "write", tostring(data.status or "OK"))
+    end
+
+    if height > y then
+        local ageText = "?"
+        if sender.lastSeen then
+            local age = math.max(0, math.floor((os.clock() or 0) - sender.lastSeen))
+            ageText = age .. "s"
+        end
+        callSelf(canvas, "setCursorPos", 1, height)
+        callSelf(canvas, "setTextColor", colors.cyan)
+        callSelf(canvas, "write", trim("Zuletzt gesehen vor " .. ageText, width))
+    end
+end
+
+local function render()
+    if not hub.canvas then
+        createCanvas()
+    end
+    local canvas = hub.canvas
+    if not canvas then
+        return
+    end
+
+    callSelf(canvas, "setVisible", false)
+    callSelf(canvas, "setBackgroundColor", colors.black)
+    callSelf(canvas, "clear")
+
+    local width, height = callSelf(canvas, "getSize")
+    width = width or 51
+    height = height or 19
+
+    if hub.view == "detail" and hub.selectedID ~= nil then
+        renderDetail(canvas, width, height)
+    else
+        renderOverview(canvas, width, height)
+    end
+
+    callSelf(canvas, "setVisible", true)
+end
+
+local function handleTouch(x, y)
+    if hub.view == "overview" then
+        for id, rowY in pairs(hub.rowRects) do
+            if y == rowY then
+                hub.view = "detail"
+                hub.selectedID = id
+                render()
+                return
+            end
+        end
+    else
+        if y == 1 and x <= 10 then
+            hub.view = "overview"
+            hub.selectedID = nil
+            render()
+            return
+        end
+    end
 end
 
 local function handleMessage(senderID, message, protocol)
@@ -304,6 +501,10 @@ local function cleanupStaleSenders()
     for id, sender in pairs(hub.senders) do
         if sender and sender.lastSeen and (now - sender.lastSeen) > cfg.staleAfter then
             hub.senders[id] = nil
+            if hub.view == "detail" and hub.selectedID == id then
+                hub.view = "overview"
+                hub.selectedID = nil
+            end
         end
     end
 end
@@ -322,6 +523,9 @@ local function eventLoop()
             render()
             tick = os.startTimer(cfg.refreshEvery)
         elseif event == "monitor_touch" then
+            handleTouch(p2, p3)
+        elseif event == "monitor_resize" then
+            createCanvas()
             render()
         elseif event == "peripheral" then
             local side = p1
@@ -348,7 +552,9 @@ local function eventLoop()
             if side == hub.monitorSide then
                 hub.monitor = nil
                 hub.monitorSide = nil
+                hub.canvas = nil
                 print("[HUB] Monitor entfernt, wechsle auf Bildschirm-Fallback.")
+                createCanvas()
                 render()
             elseif side == hub.modemSide then
                 hub.modemSide = nil
@@ -361,6 +567,9 @@ end
 local function main()
     waitForModem()
     attachMonitor()
+    if not hub.canvas then
+        createCanvas()
+    end
     render()
     eventLoop()
 end
