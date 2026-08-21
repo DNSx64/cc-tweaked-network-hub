@@ -60,11 +60,13 @@ local function call(obj, method, ...)
     return a, b
 end
 
--- Ruft eine Methode eines "self"-basierten Objekts auf (z. B. ein window-Objekt aus
--- window.create() - im Gegensatz zu Peripherals erwarten diese das Objekt selbst als
--- ersten Parameter, genau wie bei einem klassischen obj:method()-Aufruf).
--- Wird ausschliesslich fuer den Anzeigepuffer (Canvas) verwendet - schlaegt ein Aufruf
--- fehl, wird das laut protokolliert, statt den Monitor stillschweigend leer zu lassen.
+-- Ruft eine Methode des Anzeigepuffers (window-Objekt aus window.create()) auf. Genau
+-- wie gewrappte Peripherals binden CC:Tweaked-window-Objekte "self" bereits intern per
+-- Closure - das Objekt darf NICHT zusaetzlich als erstes Argument mitgegeben werden
+-- (sonst verschieben sich alle echten Argumente um eine Position, z. B.
+-- "setCursorPos: bad argument #1 (number expected, got table)").
+-- Schlaegt ein Aufruf trotzdem fehl, wird das protokolliert statt den Monitor
+-- stillschweigend leer zu lassen.
 local function callSelf(obj, method, ...)
     if type(obj) ~= "table" then
         print("[HUB] Anzeige-Fehler: kein gueltiger Anzeigepuffer (Methode " .. tostring(method) .. ")")
@@ -75,7 +77,7 @@ local function callSelf(obj, method, ...)
         print("[HUB] Anzeige-Fehler: Methode nicht gefunden: " .. tostring(method))
         return nil
     end
-    local ok, a, b = pcall(fn, obj, ...)
+    local ok, a, b = pcall(fn, ...)
     if not ok then
         print("[HUB] Anzeige-Fehler bei " .. tostring(method) .. ": " .. tostring(a))
         return nil
