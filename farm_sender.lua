@@ -204,7 +204,8 @@ local function collectStatus()
         machineStatus = "OK",
     }
 
-    local energyDevice = findPeripheral("energyStorage")
+    local energyDevice = findPeripheral("energyDetector")
+        or findPeripheral("energyStorage")
         or findPeripheral("capacitor")
         or findPeripheral("battery")
         or findPeripheral("rfStorage")
