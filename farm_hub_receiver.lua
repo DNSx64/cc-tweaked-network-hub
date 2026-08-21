@@ -3,6 +3,11 @@
 -- Vollautomatisch: Modem-Seite und Monitor werden zur Laufzeit erkannt (inkl. Hotplug).
 -- Ohne Monitor läuft die Anzeige als Fallback auf dem eigenen Computer-Bildschirm.
 
+-- Versionskennung: wird beim Start ausgegeben, damit man im Terminal eindeutig sehen
+-- kann, ob wirklich die neueste heruntergeladene Version laeuft (statt eines alten,
+-- gecachten Skripts).
+local SCRIPT_VERSION = "2026-08-21-2 (callSelf ohne self-Argument)"
+
 local peripheral = peripheral
 local rednet = rednet
 local os = os
@@ -701,6 +706,7 @@ local function eventLoop()
 end
 
 local function main()
+    print("[HUB] Version: " .. SCRIPT_VERSION)
     waitForModem()
     attachMonitor()
     if not hub.canvas then
