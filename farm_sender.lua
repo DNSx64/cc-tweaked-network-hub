@@ -1,6 +1,6 @@
 -- MULTI-SYSTEM NETWORK SENDER
 -- Sendet Statusdaten für Energie, ME/AE2, Flüssigkeit, Inventar und Maschinenbetrieb an den Hub.
--- Anforderungen: Rednet-Modem auf "back". Optional passende Peripheriegeräte der Maschine.
+-- Vollautomatisch: Modem-Seite und alle Peripheriegeräte werden zur Laufzeit erkannt (inkl. Hotplug).
 
 local peripheral = peripheral
 local rednet = rednet
@@ -9,12 +9,15 @@ local textutils = textutils
 local sleep = sleep
 
 local cfg = {
-    modemSide = "back",
     protocol = "network_status_v1",
     sendInterval = 2,
     hubID = 0,
     senderName = "NODE-01",
     machineName = "Generic Machine",
+}
+
+local state = {
+    modemSide = nil,
 }
 
 local function findPeripheral(name)
@@ -28,7 +31,9 @@ local function findPeripheral(name)
     return nil
 end
 
-local function safeCall(obj, method, ...)
+-- Ruft eine Peripherie-Methode sicher auf, OHNE das Objekt selbst als extra
+-- Argument mitzugeben (gewrappte CC:Tweaked-Peripherals erwarten kein self!).
+local function call(obj, method, ...)
     if type(obj) ~= "table" then
         return nil
     end
@@ -36,7 +41,7 @@ local function safeCall(obj, method, ...)
     if type(fn) ~= "function" then
         return nil
     end
-    local ok, result = pcall(fn, obj, ...)
+    local ok, result = pcall(fn, ...)
     if not ok then
         return nil
     end
@@ -59,17 +64,17 @@ local function getEnergy(device)
         return nil
     end
 
-    local stored = safeCall(device, "getEnergyStored")
-        or safeCall(device, "getStoredEnergy")
-        or safeCall(device, "getEnergyLevel")
-        or safeCall(device, "getEnergy")
-        or safeCall(device, "getStored")
+    local stored = call(device, "getEnergyStored")
+        or call(device, "getStoredEnergy")
+        or call(device, "getEnergyLevel")
+        or call(device, "getEnergy")
+        or call(device, "getStored")
 
-    local capacity = safeCall(device, "getMaxEnergyStored")
-        or safeCall(device, "getCapacity")
-        or safeCall(device, "getMaxEnergy")
-        or safeCall(device, "getMaxStored")
-        or safeCall(device, "getEnergyCapacity")
+    local capacity = call(device, "getMaxEnergyStored")
+        or call(device, "getCapacity")
+        or call(device, "getMaxEnergy")
+        or call(device, "getMaxStored")
+        or call(device, "getEnergyCapacity")
 
     if stored == nil or capacity == nil then
         return nil
@@ -93,10 +98,10 @@ local function getME(device)
         return nil
     end
 
-    local items = safeCall(device, "getItems")
-        or safeCall(device, "listItems")
-        or safeCall(device, "getItemList")
-        or safeCall(device, "getAvailableItems")
+    local items = call(device, "getItems")
+        or call(device, "listItems")
+        or call(device, "getItemList")
+        or call(device, "getAvailableItems")
 
     local count = 0
     if type(items) == "table" then
@@ -114,13 +119,13 @@ local function getFluid(device)
         return nil
     end
 
-    local stored = safeCall(device, "getFluidAmount")
-        or safeCall(device, "getAmount")
-        or safeCall(device, "getStored")
+    local stored = call(device, "getFluidAmount")
+        or call(device, "getAmount")
+        or call(device, "getStored")
 
-    local capacity = safeCall(device, "getCapacity")
-        or safeCall(device, "getMaxAmount")
-        or safeCall(device, "getMaxStored")
+    local capacity = call(device, "getCapacity")
+        or call(device, "getMaxAmount")
+        or call(device, "getMaxStored")
 
     if stored == nil or capacity == nil then
         return nil
@@ -144,9 +149,9 @@ local function getInventory(device)
         return nil
     end
 
-    local items = safeCall(device, "list")
-        or safeCall(device, "getItems")
-        or safeCall(device, "getAllItems")
+    local items = call(device, "list")
+        or call(device, "getItems")
+        or call(device, "getAllItems")
 
     if type(items) ~= "table" then
         return nil
@@ -163,10 +168,10 @@ local function getMachineState(device)
         return "N/A"
     end
 
-    local status = safeCall(device, "getStatus")
-        or safeCall(device, "getMachineStatus")
-        or safeCall(device, "getState")
-        or safeCall(device, "isRunning")
+    local status = call(device, "getStatus")
+        or call(device, "getMachineStatus")
+        or call(device, "getState")
+        or call(device, "isRunning")
 
     if type(status) == "boolean" then
         return status and "RUNNING" or "IDLE"
@@ -176,7 +181,7 @@ local function getMachineState(device)
         return status
     end
 
-    local active = safeCall(device, "isActive")
+    local active = call(device, "isActive")
     if type(active) == "boolean" then
         return active and "ACTIVE" or "IDLE"
     end
@@ -247,25 +252,40 @@ end
 local function ensureModem()
     local modem = findPeripheral("modem")
     if not modem then
-        print("[SENDER] Kein Rednet-Modem gefunden. Prüfe, ob ein Wireless-/Ender-Modem am Computer hängt (bei Wired Modems: Rechtsklick zum Aktivieren).")
         return false
     end
 
-    local actualSide = peripheral.getName and peripheral.getName(modem) or cfg.modemSide
-
-    if rednet and rednet.open then
-        if rednet.isOpen and rednet.isOpen(actualSide) then
-            return true
-        end
-        local ok, err = pcall(rednet.open, actualSide)
-        if not ok then
-            print("[SENDER] Modem konnte nicht geöffnet werden (Seite " .. tostring(actualSide) .. "): " .. tostring(err))
-            return false
-        end
-        print("[SENDER] Modem gefunden und geöffnet auf Seite: " .. tostring(actualSide))
+    local side = peripheral.getName and peripheral.getName(modem) or nil
+    if not side then
+        return false
     end
 
+    if rednet.isOpen and rednet.isOpen(side) then
+        state.modemSide = side
+        return true
+    end
+
+    local ok = pcall(rednet.open, side)
+    if not ok then
+        return false
+    end
+
+    if state.modemSide ~= side then
+        print("[SENDER] Modem aktiv auf Seite: " .. side)
+    end
+    state.modemSide = side
     return true
+end
+
+local function waitForModem()
+    local warned = false
+    while not ensureModem() do
+        if not warned then
+            print("[SENDER] Warte auf Rednet-Modem (Wireless-/Ender-Modem anschließen oder Wired-Modem per Rechtsklick aktivieren)...")
+            warned = true
+        end
+        os.pullEvent("peripheral")
+    end
 end
 
 local function sendPacket()
@@ -280,15 +300,16 @@ local function sendPacket()
 end
 
 local function main()
-    if not ensureModem() then
-        error("[SENDER] Modem fehlt. Sender stoppt.")
-    end
+    waitForModem()
 
     while true do
+        ensureModem()
+
         local ok, err = pcall(sendPacket)
         if not ok then
             print("[SENDER] Fehler beim Senden: " .. tostring(err))
         end
+
         sleep(cfg.sendInterval)
     end
 end

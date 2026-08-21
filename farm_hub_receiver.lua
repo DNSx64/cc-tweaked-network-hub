@@ -1,16 +1,16 @@
 -- MULTI-SYSTEM HUB / RECEIVER
 -- Zentrale Übersicht für Energie, ME/AE2, Flüssigkeit, Inventar und Maschinen-Status.
--- Anforderungen: Modem auf "back", Monitor optional auf "top" oder anderer Peripheral-Seite.
+-- Vollautomatisch: Modem-Seite und Monitor werden zur Laufzeit erkannt (inkl. Hotplug).
+-- Ohne Monitor läuft die Anzeige als Fallback auf dem eigenen Computer-Bildschirm.
 
 local peripheral = peripheral
 local rednet = rednet
 local os = os
 local colors = colors
 local textutils = textutils
+local term = term
 
 local cfg = {
-    modemSide = "back",
-    monitorSide = "top",
     protocol = "network_status_v1",
     refreshEvery = 0.5,
     staleAfter = 15,
@@ -19,7 +19,20 @@ local cfg = {
 
 local hub = {
     monitor = nil,
+    monitorSide = nil,
+    modemSide = nil,
     senders = {},
+}
+
+-- Adapter, damit der eigene Computer-Bildschirm (term) dieselbe Aufruf-Konvention
+-- wie ein gewrapptes Monitor-Peripheriegeärt versteht (einheitliches render()).
+local termAdapter = {
+    setBackgroundColor = function(_, c) term.setBackgroundColor(c) end,
+    setTextColor = function(_, c) term.setTextColor(c) end,
+    clear = function(_) term.clear() end,
+    setCursorPos = function(_, x, y) term.setCursorPos(x, y) end,
+    write = function(_, s) term.write(s) end,
+    getSize = function(_) return term.getSize() end,
 }
 
 local function trim(value, maxLen)
@@ -32,18 +45,9 @@ local function trim(value, maxLen)
     return value
 end
 
-local function wrapPeripheral(name)
-    if type(name) ~= "string" then
-        return nil
-    end
-    local found = peripheral.find(name)
-    if found and type(found) == "table" then
-        return found
-    end
-    return nil
-end
-
-local function safeCall(obj, method, ...)
+-- Ruft eine Peripherie-Methode sicher auf, OHNE das Objekt selbst als extra
+-- Argument mitzugeben (gewrappte CC:Tweaked-Peripherals erwarten kein self!).
+local function call(obj, method, ...)
     if type(obj) ~= "table" then
         return nil
     end
@@ -51,71 +55,73 @@ local function safeCall(obj, method, ...)
     if type(fn) ~= "function" then
         return nil
     end
-    local ok, result = pcall(fn, obj, ...)
+    local ok, a, b = pcall(fn, ...)
     if not ok then
         return nil
     end
-    return result
+    return a, b
+end
+
+local function getScreen()
+    return hub.monitor or termAdapter
 end
 
 local function ensureModem()
-    local modem = wrapPeripheral("modem")
+    local modem = peripheral.find("modem")
     if not modem then
-        print("[HUB] Kein Rednet-Modem gefunden. Prüfe, ob ein Wireless-/Ender-Modem am Computer hängt (bei Wired Modems: Rechtsklick zum Aktivieren).")
         return false
     end
 
-    local actualSide = peripheral.getName and peripheral.getName(modem) or cfg.modemSide
-
-    if rednet and rednet.open then
-        if rednet.isOpen and rednet.isOpen(actualSide) then
-            return true
-        end
-        local ok, err = pcall(rednet.open, actualSide)
-        if not ok then
-            print("[HUB] Modem konnte nicht geöffnet werden (Seite " .. tostring(actualSide) .. "): " .. tostring(err))
-            return false
-        end
-        print("[HUB] Modem gefunden und geöffnet auf Seite: " .. tostring(actualSide))
+    local side = peripheral.getName and peripheral.getName(modem) or nil
+    if not side then
+        return false
     end
 
+    if rednet.isOpen and rednet.isOpen(side) then
+        hub.modemSide = side
+        return true
+    end
+
+    local ok = pcall(rednet.open, side)
+    if not ok then
+        return false
+    end
+
+    if hub.modemSide ~= side then
+        print("[HUB] Modem aktiv auf Seite: " .. side)
+    end
+    hub.modemSide = side
     return true
 end
 
+local function waitForModem()
+    local warned = false
+    while not ensureModem() do
+        if not warned then
+            print("[HUB] Warte auf Rednet-Modem (Wireless-/Ender-Modem anschließen oder Wired-Modem per Rechtsklick aktivieren)...")
+            warned = true
+        end
+        os.pullEvent("peripheral")
+    end
+end
+
 local function attachMonitor()
-    local mon = nil
-    if cfg.monitorSide then
-        mon = peripheral.wrap(cfg.monitorSide)
-    end
+    local mon = peripheral.find("monitor")
     if not mon then
-        mon = wrapPeripheral("monitor")
-    end
-    if not mon then
-        print("[HUB] Kein Monitor gefunden.")
         return false
     end
 
     hub.monitor = mon
+    hub.monitorSide = peripheral.getName and peripheral.getName(mon) or nil
 
-    if mon.setTextScale then
-        pcall(mon.setTextScale, mon, 0.5)
-    end
-    if mon.setBackgroundColor then
-        pcall(mon.setBackgroundColor, mon, colors.black)
-    end
-    if mon.clear then
-        pcall(mon.clear, mon)
-    end
-    if mon.setTextColor then
-        pcall(mon.setTextColor, mon, colors.lime)
-    end
-    if mon.setCursorPos then
-        pcall(mon.setCursorPos, mon, 1, 1)
-    end
-    if mon.write then
-        pcall(mon.write, mon, cfg.title)
-    end
+    call(mon, "setTextScale", 0.5)
+    call(mon, "setBackgroundColor", colors.black)
+    call(mon, "clear")
+    call(mon, "setTextColor", colors.lime)
+    call(mon, "setCursorPos", 1, 1)
+    call(mon, "write", cfg.title)
 
+    print("[HUB] Monitor gefunden auf Seite: " .. tostring(hub.monitorSide))
     return true
 end
 
@@ -158,34 +164,22 @@ local function formatFluid(val)
     return string.format("%d/%d (%d%%)", stored, capacity, math.floor((stored / capacity) * 100))
 end
 
-local function padRight(str, width)
-    str = tostring(str or "")
-    if #str >= width then
-        return str
-    end
-    return str .. string.rep(" ", width - #str)
-end
-
 local function render()
-    if not hub.monitor then
-        return
-    end
+    local screen = getScreen()
 
-    local mon = hub.monitor
-    pcall(mon.setBackgroundColor, mon, colors.black)
-    pcall(mon.clear, mon)
+    call(screen, "setBackgroundColor", colors.black)
+    call(screen, "clear")
 
-    local width, height = 51, 19
-    if mon.getSize then
-        width, height = mon.getSize()
-    end
+    local width, height = call(screen, "getSize")
+    width = width or 51
+    height = height or 19
 
-    pcall(mon.setCursorPos, mon, 1, 1)
-    pcall(mon.setTextColor, mon, colors.yellow)
-    pcall(mon.write, mon, trim(cfg.title .. "  " .. os.date("%H:%M:%S"), width))
+    call(screen, "setCursorPos", 1, 1)
+    call(screen, "setTextColor", colors.yellow)
+    call(screen, "write", trim(cfg.title .. "  " .. os.date("%H:%M:%S"), width))
 
-    pcall(mon.setCursorPos, mon, 1, 2)
-    pcall(mon.write, mon, string.rep("-", width))
+    call(screen, "setCursorPos", 1, 2)
+    call(screen, "write", string.rep("-", width))
 
     local rows = {}
     for id, sender in pairs(hub.senders) do
@@ -212,9 +206,9 @@ local function render()
     local xPos = {1, 5, 17, 31, 36, 45, 50}
 
     for i = 1, #header do
-        pcall(mon.setCursorPos, mon, xPos[i], 3)
-        pcall(mon.setTextColor, mon, colors.white)
-        pcall(mon.write, mon, trim(header[i], 10))
+        call(screen, "setCursorPos", xPos[i], 3)
+        call(screen, "setTextColor", colors.white)
+        call(screen, "write", trim(header[i], 10))
     end
 
     local y = 4
@@ -235,23 +229,24 @@ local function render()
         }
 
         for c = 1, #values do
-            pcall(mon.setCursorPos, mon, xPos[c], y)
-            pcall(mon.setTextColor, mon, (i % 2 == 0) and colors.gray or colors.lime)
-            pcall(mon.write, mon, trim(values[c], 10))
+            call(screen, "setCursorPos", xPos[c], y)
+            call(screen, "setTextColor", (i % 2 == 0) and colors.gray or colors.lime)
+            call(screen, "write", trim(values[c], 10))
         end
 
         y = y + 1
     end
 
     if #rows == 0 then
-        pcall(mon.setCursorPos, mon, 1, 5)
-        pcall(mon.setTextColor, mon, colors.yellow)
-        pcall(mon.write, mon, "Warte auf Sender...")
+        call(screen, "setCursorPos", 1, 5)
+        call(screen, "setTextColor", colors.yellow)
+        call(screen, "write", "Warte auf Sender...")
     end
 
-    pcall(mon.setCursorPos, mon, 1, height)
-    pcall(mon.setTextColor, mon, colors.cyan)
-    pcall(mon.write, mon, "Live: " .. tostring(#rows) .. " sender")
+    call(screen, "setCursorPos", 1, height)
+    call(screen, "setTextColor", colors.cyan)
+    local suffix = hub.monitor and "" or " (Fallback: eigener Bildschirm, kein Monitor erkannt)"
+    call(screen, "write", "Live: " .. tostring(#rows) .. " sender" .. suffix)
 end
 
 local function handleMessage(senderID, message, protocol)
@@ -292,22 +287,39 @@ local function eventLoop()
             handleMessage(p1, p2, p3)
         elseif event == "timer" and p1 == tick then
             cleanupStaleSenders()
+            ensureModem()
             render()
             tick = os.startTimer(cfg.refreshEvery)
         elseif event == "monitor_touch" then
             render()
+        elseif event == "peripheral" then
+            local side = p1
+            local ptype = peripheral.getType(side)
+            if ptype == "monitor" and not hub.monitor then
+                if attachMonitor() then
+                    render()
+                end
+            elseif ptype == "modem" then
+                ensureModem()
+            end
+        elseif event == "peripheral_detach" then
+            local side = p1
+            if side == hub.monitorSide then
+                hub.monitor = nil
+                hub.monitorSide = nil
+                print("[HUB] Monitor entfernt, wechsle auf Bildschirm-Fallback.")
+                render()
+            elseif side == hub.modemSide then
+                hub.modemSide = nil
+                print("[HUB] Modem entfernt, suche neues Modem...")
+            end
         end
     end
 end
 
 local function main()
-    if not ensureModem() then
-        error("[HUB] Kein Rednet-Modem vorhanden.")
-    end
-    if not attachMonitor() then
-        error("[HUB] Kein Monitor verfügbar.")
-    end
-
+    waitForModem()
+    attachMonitor()
     render()
     eventLoop()
 end
