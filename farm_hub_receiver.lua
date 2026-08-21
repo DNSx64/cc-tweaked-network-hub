@@ -66,8 +66,39 @@ local function getScreen()
     return hub.monitor or termAdapter
 end
 
+local function normalizeTypeName(value)
+    return tostring(value or ""):lower():gsub("[^%a]", "")
+end
+
+-- Sucht ein Peripheriegerät zunächst über peripheral.find(type). Falls das nichts
+-- findet, wird zusätzlich normalisiert (Groß-/Kleinschreibung, Unterstriche) über
+-- ALLE von peripheral.getType() gemeldeten Typen gesucht (ein "Generic Peripheral"
+-- kann laut CC:Tweaked-API mehrere Typen gleichzeitig melden).
+local function findPeripheral(name)
+    local found = peripheral.find(name)
+    if found and type(found) == "table" then
+        return found
+    end
+
+    local target = normalizeTypeName(name)
+    for _, peripheralName in ipairs(peripheral.getNames()) do
+        local types = table.pack(peripheral.getType(peripheralName))
+        for i = 1, types.n do
+            if types[i] and normalizeTypeName(types[i]) == target then
+                local ok, wrapped = pcall(peripheral.wrap, peripheralName)
+                if ok and type(wrapped) == "table" then
+                    return wrapped
+                end
+                break
+            end
+        end
+    end
+
+    return nil
+end
+
 local function ensureModem()
-    local modem = peripheral.find("modem")
+    local modem = findPeripheral("modem")
     if not modem then
         return false
     end
@@ -106,7 +137,7 @@ local function waitForModem()
 end
 
 local function attachMonitor()
-    local mon = peripheral.find("monitor")
+    local mon = findPeripheral("monitor")
     if not mon then
         return false
     end
@@ -294,12 +325,22 @@ local function eventLoop()
             render()
         elseif event == "peripheral" then
             local side = p1
-            local ptype = peripheral.getType(side)
-            if ptype == "monitor" and not hub.monitor then
+            local types = table.pack(peripheral.getType(side))
+            local isMonitor, isModem = false, false
+            for i = 1, types.n do
+                local normalized = normalizeTypeName(types[i])
+                if normalized == "monitor" then
+                    isMonitor = true
+                elseif normalized == "modem" then
+                    isModem = true
+                end
+            end
+            if isMonitor and not hub.monitor then
                 if attachMonitor() then
                     render()
                 end
-            elseif ptype == "modem" then
+            end
+            if isModem then
                 ensureModem()
             end
         elseif event == "peripheral_detach" then

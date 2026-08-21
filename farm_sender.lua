@@ -35,15 +35,20 @@ local function findPeripheral(name)
     end
 
     -- Fallback: manche Mods registrieren ihren Peripherie-Typ mit abweichender
-    -- Gro\u00df-/Kleinschreibung oder Unterstrichen (z. B. "energy_detector" statt
-    -- "energyDetector"). Deshalb zus\u00e4tzlich normalisiert nach Typ suchen.
+    -- Groß-/Kleinschreibung oder Unterstrichen (z. B. "energy_detector" statt
+    -- "energyDetector"). Zusätzlich kann ein "Generic Peripheral" laut CC:Tweaked-API
+    -- MEHRERE Typen gleichzeitig melden (peripheral.getType gibt dann mehrere Werte
+    -- zurück) - deshalb werden hier alle gemeldeten Typen geprüft, nicht nur der erste.
     local target = normalizeTypeName(name)
     for _, peripheralName in ipairs(peripheral.getNames()) do
-        local ptype = peripheral.getType(peripheralName)
-        if ptype and normalizeTypeName(ptype) == target then
-            local ok, wrapped = pcall(peripheral.wrap, peripheralName)
-            if ok and type(wrapped) == "table" then
-                return wrapped
+        local types = table.pack(peripheral.getType(peripheralName))
+        for i = 1, types.n do
+            if types[i] and normalizeTypeName(types[i]) == target then
+                local ok, wrapped = pcall(peripheral.wrap, peripheralName)
+                if ok and type(wrapped) == "table" then
+                    return wrapped
+                end
+                break
             end
         end
     end
