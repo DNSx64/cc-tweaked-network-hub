@@ -446,22 +446,73 @@ local function getInventory()
         return nil, nil
     end
 
-    local totalCount = 0
+    local totalItems = 0
     local details = {}
 
     for _, entry in ipairs(devices) do
-        local items = call(entry.device, "list")
-            or call(entry.device, "getItems")
-            or call(entry.device, "getAllItems")
+        local device = entry.device
 
+        -- Standard-Inventory-API (auch Functional Storage): list() liefert je
+        -- belegtem Slot einen Eintrag mit "count" (bzw. "amount"). Wir summieren
+        -- die ECHTEN Stueckzahlen und zaehlen die belegten Slots (= Item-Typen).
+        local items = call(device, "list")
+            or call(device, "getItems")
+            or call(device, "getAllItems")
+
+        local deviceItems, usedSlots = 0, 0
         if type(items) == "table" then
-            local count = countTable(items)
-            totalCount = totalCount + count
-            table.insert(details, {
-                category = "inventory",
-                source = entry.name,
-                text = string.format("%s: %d Slots belegt", entry.name, count),
-            })
+            for _, item in pairs(items) do
+                if type(item) == "table" then
+                    usedSlots = usedSlots + 1
+                    deviceItems = deviceItems + (tonumber(item.count) or tonumber(item.amount) or 0)
+                end
+            end
+        end
+
+        totalItems = totalItems + deviceItems
+
+        -- Gesamt-Slotzahl (falls das Geraet size() unterstuetzt).
+        local totalSlots = tonumber(call(device, "size"))
+        local slotInfo
+        if totalSlots and totalSlots > 0 then
+            slotInfo = string.format("%d/%d Slots", usedSlots, totalSlots)
+        else
+            slotInfo = string.format("%d Slots belegt", usedSlots)
+        end
+
+        table.insert(details, {
+            category = "inventory",
+            source = entry.name,
+            text = string.format("%s: %s Items (%s)", entry.name, humanize(deviceItems), slotInfo),
+            percent = (totalSlots and totalSlots > 0) and math.floor((usedSlots / totalSlots) * 100) or nil,
+        })
+
+        -- Fluids (z. B. Functional Storage Fluid-Drawer): tanks() -> Liste mit
+        -- {name, amount, capacity} je Tank.
+        local tanks = call(device, "tanks")
+        if type(tanks) == "table" then
+            for _, tank in pairs(tanks) do
+                if type(tank) == "table" and (tank.amount or tank.name) then
+                    local amount = tonumber(tank.amount) or 0
+                    local capacity = tonumber(tank.capacity)
+                    local fluidName = tank.name or "fluid"
+                    if capacity and capacity > 0 then
+                        local percent = math.floor((amount / capacity) * 100)
+                        table.insert(details, {
+                            category = "inventory",
+                            source = entry.name,
+                            text = string.format("%s Fluid %s: %s / %s mB (%d%%)", entry.name, fluidName, humanize(amount), humanize(capacity), percent),
+                            percent = percent,
+                        })
+                    elseif amount > 0 then
+                        table.insert(details, {
+                            category = "inventory",
+                            source = entry.name,
+                            text = string.format("%s Fluid %s: %s mB", entry.name, fluidName, humanize(amount)),
+                        })
+                    end
+                end
+            end
         end
     end
 
@@ -470,7 +521,7 @@ local function getInventory()
     end
 
     local summary = {
-        count = totalCount,
+        count = totalItems,
         sources = #devices,
     }
 
@@ -626,7 +677,7 @@ local function sendPacket()
 end
 
 local function main()
-    print("[SENDER] Version 3.1 startet...")
+    print("[SENDER] Version 3.2 startet...")
     waitForModem()
     reportPeripheralChanges()
 
