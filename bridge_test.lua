@@ -114,7 +114,7 @@ end
 --  Test-Ablauf
 -- ---------------------------------------------------------------------------
 
-print("=== bridge_test v1.1 ===")
+print("=== bridge_test v1.2 ===")
 if monitor then
     print("(Ausgabe auf Monitor: " .. peripheral.getName(monitor) .. ")")
 end
@@ -191,6 +191,48 @@ for idx, b in ipairs(bridges) do
 
     print("")
 end
+
+-- ---------------------------------------------------------------------------
+--  Zusaetzlich: normale Inventare (Kiste, Fass, RS/AE-Interface am Kabel)
+-- ---------------------------------------------------------------------------
+-- Wenn die Bridge 0 Items liefert, kann man Items auch direkt aus einem
+-- Inventar lesen. Jedes Peripheriegeraet mit einer list()-Methode ist ein
+-- Inventar (chest, barrel, drawer, functionalstorage, RS/AE Interface, ...).
+
+print("--- Inventare (list-Methode) ---")
+local foundInv = 0
+for _, pname in ipairs(names) do
+    local ok, dev = pcall(peripheral.wrap, pname)
+    if ok and type(dev) == "table" and type(dev.list) == "function" then
+        foundInv = foundInv + 1
+        local contents, err = call(dev, "list")
+        if contents == nil then
+            printf("  %-22s list() FEHLER -> %s", pname, tostring(err))
+        else
+            local slots = countEntries(contents)
+            local total = 0
+            for _, it in pairs(contents) do total = total + (it.count or it.amount or 0) end
+            local sz = call(dev, "size")
+            printf("  %-22s belegte Slots=%d/%s, Items gesamt=%d",
+                pname, slots, tostring(sz or "?"), total)
+            local shown = 0
+            for _, it in pairs(contents) do
+                shown = shown + 1
+                printf("     %2d) %-26s x %s", shown, itemName(it), tostring(itemAmount(it)))
+                if shown >= 5 then
+                    if slots > 5 then printf("     ... und %d weitere Slots", slots - 5) end
+                    break
+                end
+            end
+        end
+    end
+end
+if foundInv == 0 then
+    print("  Keine normalen Inventare gefunden.")
+    print("  -> Tipp: RS/AE Interface oder Kiste per Wired Modem ans Kabel")
+    print("     haengen, dann tauchen sie hier als Inventar auf.")
+end
+print("")
 
 print("=== fertig ===")
 restoreTerm()
