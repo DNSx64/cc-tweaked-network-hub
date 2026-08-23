@@ -20,7 +20,7 @@
 --  WICHTIG (CC:Tweaked): Peripherals UND window-Objekte OHNE self aufrufen.
 -- ============================================================================
 
-local SCRIPT_VERSION = "1.0"
+local SCRIPT_VERSION = "1.1"
 
 local cfg = {
     title        = "ME DASHBOARD / ITEMS",
@@ -47,6 +47,13 @@ local function call(obj, method, ...)
     local ok, a = pcall(fn, ...)
     if not ok then return nil end
     return a
+end
+
+-- AP 0.7 auf MC 1.21.1 nutzt getItems({}); aeltere Versionen listItems().
+local function getBridgeItems(bridge)
+    local items = call(bridge, "getItems", {})
+    if type(items) == "table" then return items end
+    return call(bridge, "listItems")
 end
 
 local function num(value) return tonumber(value) or 0 end
@@ -159,7 +166,7 @@ local function selectBridge()
     local bridges = listBridges()
     local best, bestCount = nil, -1
     for _, b in ipairs(bridges) do
-        local items = call(b.dev, "listItems")
+        local items = getBridgeItems(b.dev)
         local n = 0
         if type(items) == "table" then for _ in pairs(items) do n = n + 1 end end
         if n > bestCount then best, bestCount = b, n end
@@ -215,13 +222,13 @@ local function refreshItems()
     if not b then state.online = false return end
     state.online = true
 
-    local items = call(b, "listItems")
+    local items = getBridgeItems(b)
     -- Liefert die aktuelle Bridge nichts, aber es gibt evtl. eine andere (z. B.
     -- RS statt leerer ME): neu waehlen und erneut versuchen.
     if type(items) ~= "table" or next(items) == nil then
         if selectBridge() and state.bridge ~= b then
             b = state.bridge
-            items = call(b, "listItems")
+            items = getBridgeItems(b)
         end
     end
 

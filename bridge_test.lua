@@ -1,4 +1,4 @@
--- bridge_test.lua  -  Gezielter Item-Test fuer ME / RS Bridge (v1.0)
+-- bridge_test.lua  -  Gezielter Item-Test fuer ME / RS Bridge (v1.5)
 --
 -- Findet ALLE ME-/RS-Bridges im Netzwerk und testet Schritt fuer Schritt,
 -- ob und wieviele Items sie liefern. Zeigt genau, WO es klemmt:
@@ -129,7 +129,7 @@ end
 --  Test-Ablauf
 -- ---------------------------------------------------------------------------
 
-print("=== bridge_test v1.4 ===")
+print("=== bridge_test v1.5 ===")
 if monitor then
     print("(Ausgabe auf Monitor: " .. peripheral.getName(monitor) .. ")")
 end
@@ -167,8 +167,8 @@ for idx, b in ipairs(bridges) do
     end
 
     -- Energie (nur zur Kontrolle, ob die Bridge ueberhaupt antwortet).
-    local e   = call(b.dev, "getEnergyStorage")
-    local em  = call(b.dev, "getMaxEnergyStorage")
+    local e   = call(b.dev, "getStoredEnergy") or call(b.dev, "getEnergyStorage")
+    local em  = call(b.dev, "getEnergyCapacity") or call(b.dev, "getMaxEnergyStorage")
     printf("  Energie          : %s / %s", tostring(e), tostring(em))
 
     -- Speicher-Kapazitaet.
@@ -181,13 +181,18 @@ for idx, b in ipairs(bridges) do
         printf("  Item-Extern max  : %s", tostring(call(b.dev, "getMaxItemExternalStorage")))
     end
 
-    -- DER eigentliche Test: listItems.
-    local items, err = call(b.dev, "listItems")
+    -- DER eigentliche Test: neue 1.21.1-API, danach Legacy-Fallback.
+    local items, err = call(b.dev, "getItems", {})
+    local itemMethod = "getItems({})"
     if items == nil then
-        printf("  listItems()      : FEHLER -> %s", tostring(err))
+        items, err = call(b.dev, "listItems")
+        itemMethod = "listItems()"
+    end
+    if items == nil then
+        printf("  Item-Liste       : FEHLER -> %s", tostring(err))
     else
         local n = countEntries(items)
-        printf("  listItems()      : Typ=%s, Eintraege=%d", type(items), n)
+        printf("  %-17s: Typ=%s, Eintraege=%d", itemMethod, type(items), n)
         if n == 0 then
             print("     (leer! Bridge ist verbunden, aber das Netz meldet 0 Items")
             print("      -> falsches Netz? Storage nicht mit Bridge verkabelt?)")

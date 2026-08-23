@@ -15,11 +15,11 @@
 --
 --  Grenzen der ME-Bridge-API: AE2-Kanaele/Subnets und die Items EINER
 --  EINZELNEN Platte werden von Advanced Peripherals NICHT bereitgestellt.
---  Diese Felder werden daher als "n/a" markiert bzw. aus listCells (Typen/
---  Bytes) und listItems (Top-Verbraucher) bestmoeglich hergeleitet.
+--  Diese Felder werden daher als "n/a" markiert bzw. aus getCells (Typen/
+--  Bytes) und getItems (Top-Verbraucher) bestmoeglich hergeleitet.
 -- ============================================================================
 
-local SCRIPT_VERSION = "1.1"
+local SCRIPT_VERSION = "1.2"
 
 local cfg = {
     title        = "ME SYSTEM",
@@ -53,6 +53,13 @@ local function call(obj, method, ...)
     local ok, a = pcall(fn, ...)
     if not ok then return nil end
     return a
+end
+
+-- AP 0.7 auf MC 1.21.1 nutzt getItems({}); aeltere Versionen listItems().
+local function getBridgeItems(bridge)
+    local items = call(bridge, "getItems", {})
+    if type(items) == "table" then return items end
+    return call(bridge, "listItems")
 end
 
 local function num(value)
@@ -184,7 +191,7 @@ local function selectBridge()
     local bridges = listBridges()
     local best, bestCount = nil, -1
     for _, b in ipairs(bridges) do
-        local items = call(b.dev, "listItems")
+        local items = getBridgeItems(b.dev)
         local n = 0
         if type(items) == "table" then for _ in pairs(items) do n = n + 1 end end
         if n > bestCount then best, bestCount = b, n end
@@ -278,21 +285,33 @@ local function collectFast()
     d.online = true
 
     -- Energie (RS -> FE, ME -> AE).
-    d.energyStored = num(call(b, "getEnergyStorage"))
-    d.energyMax    = num(call(b, "getMaxEnergyStorage"))
+    d.energyStored = num(call(b, "getStoredEnergy") or call(b, "getEnergyStorage"))
+    d.energyMax    = num(call(b, "getEnergyCapacity") or call(b, "getMaxEnergyStorage"))
     d.energyUsage  = num(call(b, "getEnergyUsage"))
     d.energyUnit   = isRS and "FE" or "AE"
 
     if isRS then
-        -- RS: kein "used/total item storage" in Bytes. Kapazitaet = Disk +
-        -- externer Speicher (in Stueck), Belegung = Summe aller Item-Mengen.
-        d.itemTotal = num(call(b, "getMaxItemDiskStorage")) + num(call(b, "getMaxItemExternalStorage"))
-        d.itemUsed  = d.itemTotalCount  -- wird in collectSlow gefuellt
+        -- Neue 1.21.1-API: getUsed/TotalItemStorage in Stueck. Legacy-RS:
+        -- Kapazitaet aus Disk + externem Speicher, Belegung aus der Item-Liste.
+        local newItemTotal = call(b, "getTotalItemStorage")
+        if newItemTotal ~= nil then
+            d.itemTotal = num(newItemTotal)
+            d.itemUsed = num(call(b, "getUsedItemStorage"))
+        else
+            d.itemTotal = num(call(b, "getMaxItemDiskStorage")) + num(call(b, "getMaxItemExternalStorage"))
+            d.itemUsed = d.itemTotalCount
+        end
         d.itemUnit  = "Stk."
-        d.fluidTotal = num(call(b, "getMaxFluidDiskStorage")) + num(call(b, "getMaxFluidExternalStorage"))
-        d.fluidUsed  = d.fluidUsedLive or 0
+        local newFluidTotal = call(b, "getTotalFluidStorage")
+        if newFluidTotal ~= nil then
+            d.fluidTotal = num(newFluidTotal)
+            d.fluidUsed = num(call(b, "getUsedFluidStorage"))
+        else
+            d.fluidTotal = num(call(b, "getMaxFluidDiskStorage")) + num(call(b, "getMaxFluidExternalStorage"))
+            d.fluidUsed = d.fluidUsedLive or 0
+        end
         d.cpuSupported   = false   -- RS hat keine Crafting-CPUs-API
-        d.cellsSupported = false   -- RS hat kein listCells
+        d.cellsSupported = type(b.getCells) == "function" or type(b.listCells) == "function"
         d.cpus = {}
         d.cpuBusy = 0
         return
@@ -347,7 +366,7 @@ local function collectSlow()
     local isRS = state.bridgeKind == "rs"
 
     -- Alle Items -> Gesamtzahl, Typen, Top-Verbraucher, craftbare Anzahl.
-    local items = call(b, "listItems")
+    local items = getBridgeItems(b)
     local flat = {}
     local totalCount, typeCount, craftableCount = 0, 0, 0
     if type(items) == "table" then
@@ -379,7 +398,7 @@ local function collectSlow()
     d.consumers = consumers
 
     -- Fluids (Summe der Mengen) - fuer RS als Belegung genutzt.
-    local fluids = call(b, "listFluid") or call(b, "listFluids")
+    local fluids = call(b, "getFluids", {}) or call(b, "listFluid") or call(b, "listFluids")
     local fluidSum = 0
     if type(fluids) == "table" then
         for _, f in pairs(fluids) do
@@ -393,36 +412,40 @@ local function collectSlow()
     end
 
     -- Rezepte / Patterns:
-    --  Erst die dedizierte Liste probieren, sonst craftbare Items aus listItems
+    --  Erst die dedizierte Liste probieren, sonst craftbare Items aus getItems
     --  zaehlen (funktioniert bei ME und RS unabhaengig von der API-Version).
-    local craftItems = call(b, "listCraftableItems")
-    local craftFluid = call(b, "listCraftableFluid") or call(b, "listCraftableFluids")
     local patterns = 0
-    if type(craftItems) == "table" then for _ in pairs(craftItems) do patterns = patterns + 1 end end
-    if type(craftFluid) == "table" then for _ in pairs(craftFluid) do patterns = patterns + 1 end end
+    local allPatterns = call(b, "getPatterns")
+    if type(allPatterns) == "table" then
+        for _ in pairs(allPatterns) do patterns = patterns + 1 end
+    else
+        local craftItems = call(b, "getCraftableItems", {}) or call(b, "listCraftableItems")
+        local craftFluid = call(b, "getCraftableFluids", {})
+            or call(b, "listCraftableFluid") or call(b, "listCraftableFluids")
+        if type(craftItems) == "table" then for _ in pairs(craftItems) do patterns = patterns + 1 end end
+        if type(craftFluid) == "table" then for _ in pairs(craftFluid) do patterns = patterns + 1 end end
+    end
     if patterns == 0 then patterns = craftableCount end
     d.patterns = patterns
 
-    -- Platten / Zellen: nur ME (RS hat kein listCells).
-    if isRS then
-        d.cells = {}
-        d.cellCount = 0
-    else
-        local cells = call(b, "listCells")
+    -- Neue API: getCells() fuer ME und RS; Legacy-ME: listCells().
+    local cells = call(b, "getCells") or call(b, "listCells")
+    if type(cells) == "table" then
         local grouped, order = {}, {}
         local cellCount = 0
-        if type(cells) == "table" then
-            for _, cell in pairs(cells) do
-                if type(cell) == "table" then
-                    cellCount = cellCount + 1
-                    local key = tostring(cell.item or "unbekannt")
-                    if not grouped[key] then
-                        grouped[key] = { name = prettify(key), count = 0, totalBytes = 0, cellType = cell.cellType or "?" }
-                        order[#order + 1] = key
-                    end
-                    grouped[key].count = grouped[key].count + 1
-                    grouped[key].totalBytes = grouped[key].totalBytes + num(cell.totalBytes)
+        for _, cell in pairs(cells) do
+            if type(cell) == "table" then
+                cellCount = cellCount + 1
+                local cellItem = cell.item
+                local key = type(cellItem) == "table" and (cellItem.name or cellItem.displayName) or cellItem
+                key = tostring(key or "unbekannt")
+                if not grouped[key] then
+                    grouped[key] = { name = prettify(key), count = 0, totalBytes = 0, cellType = cell.type or cell.cellType or "?" }
+                    order[#order + 1] = key
                 end
+                grouped[key].count = grouped[key].count + 1
+                grouped[key].totalBytes = grouped[key].totalBytes
+                    + num(cell.bytes or cell.totalBytes or cell.capacity)
             end
         end
         local cellList = {}
@@ -430,6 +453,9 @@ local function collectSlow()
         table.sort(cellList, function(a, c) return a.totalBytes > c.totalBytes end)
         d.cells = cellList
         d.cellCount = cellCount
+    else
+        d.cells = {}
+        d.cellCount = 0
     end
 end
 

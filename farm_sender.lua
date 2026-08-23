@@ -202,7 +202,7 @@ local function prettifyItemName(id)
     return table.concat(parts, "_")
 end
 
--- Baut aus einer rohen Item-Liste (listItems()/list()) eine kompakte, nach Menge
+-- Baut aus einer rohen Item-Liste (getItems()/listItems()/list()) eine kompakte, nach Menge
 -- sortierte Liste { {name=Anzeigename, count=Anzahl}, ... } fuers Detail-Fenster.
 -- Wird bei sehr vielen Typen (z. B. grosses ME-System) begrenzt, damit die
 -- Rednet-Nachricht nicht zu gross wird.
@@ -324,10 +324,10 @@ local function getME()
     for _, entry in ipairs(devices) do
         local device = entry.device
 
-        -- RS/ME-Bridge: listItems() liefert je Eintrag ein "amount"-Feld (echte
-        -- Stueckzahl). Wir summieren die Mengen UND zaehlen die Item-Typen.
-        local items = call(device, "listItems")
-            or call(device, "getItems")
+        -- Neue AP-API (MC 1.21.1): getItems({}); Legacy: listItems().
+        -- Je Eintrag kommt count bzw. amount als echte Stueckzahl.
+        local items = call(device, "getItems", {})
+            or call(device, "listItems")
             or call(device, "getItemList")
             or call(device, "getAvailableItems")
 
@@ -377,8 +377,9 @@ local function getME()
             end
         end
 
-        -- Fluids der Bridge: ME nutzt listFluid() (Singular), RS listFluids() (Plural).
-        local fluids = call(device, "listFluid") or call(device, "listFluids")
+        -- Neue AP-API: getFluids({}); Legacy: listFluid(s)().
+        local fluids = call(device, "getFluids", {})
+            or call(device, "listFluid") or call(device, "listFluids")
         if type(fluids) == "table" then
             local fAmount, fTypes = 0, 0
             for _, f in pairs(fluids) do
@@ -417,7 +418,7 @@ local function getME()
 
         -- Energie des RS/ME-Systems (RS in FE, ME in AE).
         local eStored = extractNumericStat(device, { "getEnergyStorage", "getStoredEnergy", "getEnergy" })
-        local eMax = extractNumericStat(device, { "getMaxEnergyStorage", "getMaxEnergy" })
+        local eMax = extractNumericStat(device, { "getEnergyCapacity", "getMaxEnergyStorage", "getMaxEnergy" })
         if eStored and eMax and eMax > 0 then
             local percent = math.floor((eStored / eMax) * 100)
             table.insert(details, {
@@ -722,7 +723,7 @@ local function sendPacket()
 end
 
 local function main()
-    print("[SENDER] Version 3.3 startet...")
+    print("[SENDER] Version 3.4 startet...")
     waitForModem()
     reportPeripheralChanges()
 
