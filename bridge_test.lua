@@ -17,6 +17,21 @@
 local WANTED = { "meBridge", "me_bridge", "rsBridge", "rs_bridge" }
 
 -- ---------------------------------------------------------------------------
+--  Ausgabe mitschreiben (fuer den Drucker)
+-- ---------------------------------------------------------------------------
+
+-- Wir ersetzen print durch eine eigene Version, die jede Zeile zusaetzlich in
+-- printLog sammelt. Am Ende wird printLog auf einen Printer gedruckt.
+local realPrint = print
+local printLog = {}
+local function print(...)
+    local parts = {}
+    for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end
+    printLog[#printLog + 1] = table.concat(parts, "\t")
+    realPrint(...)
+end
+
+-- ---------------------------------------------------------------------------
 --  Hilfen
 -- ---------------------------------------------------------------------------
 
@@ -114,7 +129,7 @@ end
 --  Test-Ablauf
 -- ---------------------------------------------------------------------------
 
-print("=== bridge_test v1.2 ===")
+print("=== bridge_test v1.3 ===")
 if monitor then
     print("(Ausgabe auf Monitor: " .. peripheral.getName(monitor) .. ")")
 end
@@ -237,5 +252,69 @@ print("")
 print("=== fertig ===")
 restoreTerm()
 if monitor then
-    print("[bridge_test] Ausgabe steht auf dem Monitor.")
+    realPrint("[bridge_test] Ausgabe steht auf dem Monitor.")
 end
+
+-- ---------------------------------------------------------------------------
+--  Gesammelte Ausgabe auf einen Drucker (Printer) drucken
+-- ---------------------------------------------------------------------------
+
+local function printToPaper()
+    local printer = peripheral.find("printer")
+    if not printer then
+        realPrint("[bridge_test] Kein Printer gefunden - nichts gedruckt.")
+        return
+    end
+
+    local paper = call(printer, "getPaperLevel") or 0
+    local ink   = call(printer, "getInkLevel") or 0
+    if paper < 1 then
+        realPrint("[bridge_test] Printer hat kein Papier!")
+        return
+    end
+    if ink < 1 then
+        realPrint("[bridge_test] Printer hat keine Tinte (Farbstoff)!")
+        return
+    end
+
+    local page = 0
+    local function startPage()
+        if not printer.newPage() then return false end
+        page = page + 1
+        pcall(printer.setPageTitle, "bridge_test #" .. page)
+        return true
+    end
+
+    if not startPage() then
+        realPrint("[bridge_test] newPage() fehlgeschlagen (Papier/Tinte pruefen).")
+        return
+    end
+
+    local w, h = printer.getPageSize()
+    w = w or 25
+    h = h or 21
+    local y = 1
+    for _, line in ipairs(printLog) do
+        local text = (line == "") and " " or line
+        -- Zeilen, die breiter als die Seite sind, umbrechen.
+        repeat
+            local chunk = text:sub(1, w)
+            text = text:sub(w + 1)
+            printer.setCursorPos(1, y)
+            printer.write(chunk)
+            y = y + 1
+            if y > h then
+                printer.endPage()
+                if not startPage() then
+                    realPrint("[bridge_test] Papier/Tinte alle - Rest nicht gedruckt.")
+                    return
+                end
+                y = 1
+            end
+        until #text == 0
+    end
+    printer.endPage()
+    realPrint(string.format("[bridge_test] Auf Papier gedruckt: %d Seite(n).", page))
+end
+
+printToPaper()
