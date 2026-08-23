@@ -19,7 +19,7 @@
 --  Bytes) und listItems (Top-Verbraucher) bestmoeglich hergeleitet.
 -- ============================================================================
 
-local SCRIPT_VERSION = "1.0"
+local SCRIPT_VERSION = "1.1"
 
 local cfg = {
     title        = "ME SYSTEM",
@@ -102,6 +102,8 @@ end
 
 local state = {
     bridge    = nil,
+    bridgeKind = nil,      -- "me" | "rs"
+    bridgeName = nil,
     monitor   = nil,
     canvas    = nil,
     view      = "status",  -- status | item | cells
@@ -114,12 +116,13 @@ local state = {
     lastSlow  = 0,
     data = {
         energyStored = 0, energyMax = 0, energyUsage = 0,
-        itemUsed = 0, itemTotal = 0,
+        energyUnit = "AE",
+        itemUsed = 0, itemTotal = 0, itemUnit = "Bytes",
         fluidUsed = 0, fluidTotal = 0,
-        cpus = {}, cpuBusy = 0,
+        cpus = {}, cpuBusy = 0, cpuSupported = true,
         patterns = 0,
         cells = {},        -- gruppiert: { {name, count, totalBytes, cellType}, ... }
-        cellCount = 0,
+        cellCount = 0, cellsSupported = true,
         consumers = {},     -- { {name, display, amount, craftable}, ... }
         itemTypes = 0, itemTotalCount = 0,
         online = false,
@@ -151,6 +154,47 @@ local function findByType(...)
         end
     end
     return nil
+end
+
+-- Findet ALLE ME-/RS-Bridges im Netzwerk (der User kann beide haben).
+local function listBridges()
+    local out = {}
+    local wanted = { "meBridge", "me_bridge", "rsBridge", "rs_bridge" }
+    for _, pname in ipairs(peripheral.getNames()) do
+        local types = table.pack(peripheral.getType(pname))
+        for i = 1, types.n do
+            local nt = normalizeTypeName(types[i])
+            for _, want in ipairs(wanted) do
+                if nt == normalizeTypeName(want) then
+                    local ok, dev = pcall(peripheral.wrap, pname)
+                    if ok and type(dev) == "table" then
+                        out[#out + 1] = { dev = dev, kind = nt:find("me") and "me" or "rs", name = pname }
+                    end
+                    break
+                end
+            end
+        end
+    end
+    return out
+end
+
+-- Waehlt automatisch die Bridge mit den MEISTEN Items (bevorzugt das volle
+-- RS-System statt einer leeren ME Bridge).
+local function selectBridge()
+    local bridges = listBridges()
+    local best, bestCount = nil, -1
+    for _, b in ipairs(bridges) do
+        local items = call(b.dev, "listItems")
+        local n = 0
+        if type(items) == "table" then for _ in pairs(items) do n = n + 1 end end
+        if n > bestCount then best, bestCount = b, n end
+    end
+    if best then
+        state.bridge     = best.dev
+        state.bridgeKind = best.kind
+        state.bridgeName = best.name
+    end
+    return state.bridge ~= nil
 end
 
 local function findBridge()
@@ -230,18 +274,40 @@ local function collectFast()
     if not b then state.data.online = false return end
 
     local d = state.data
+    local isRS = state.bridgeKind == "rs"
     d.online = true
 
+    -- Energie (RS -> FE, ME -> AE).
     d.energyStored = num(call(b, "getEnergyStorage"))
     d.energyMax    = num(call(b, "getMaxEnergyStorage"))
     d.energyUsage  = num(call(b, "getEnergyUsage"))
+    d.energyUnit   = isRS and "FE" or "AE"
 
+    if isRS then
+        -- RS: kein "used/total item storage" in Bytes. Kapazitaet = Disk +
+        -- externer Speicher (in Stueck), Belegung = Summe aller Item-Mengen.
+        d.itemTotal = num(call(b, "getMaxItemDiskStorage")) + num(call(b, "getMaxItemExternalStorage"))
+        d.itemUsed  = d.itemTotalCount  -- wird in collectSlow gefuellt
+        d.itemUnit  = "Stk."
+        d.fluidTotal = num(call(b, "getMaxFluidDiskStorage")) + num(call(b, "getMaxFluidExternalStorage"))
+        d.fluidUsed  = d.fluidUsedLive or 0
+        d.cpuSupported   = false   -- RS hat keine Crafting-CPUs-API
+        d.cellsSupported = false   -- RS hat kein listCells
+        d.cpus = {}
+        d.cpuBusy = 0
+        return
+    end
+
+    -- ME: echte Byte-Werte.
+    d.itemUnit   = "Bytes"
     d.itemUsed   = num(call(b, "getUsedItemStorage"))
     d.itemTotal  = num(call(b, "getTotalItemStorage"))
     d.fluidUsed  = num(call(b, "getUsedFluidStorage"))
     d.fluidTotal = num(call(b, "getTotalFluidStorage"))
+    d.cpuSupported   = true
+    d.cellsSupported = true
 
-    -- Crafting-CPUs (Live: busy/idle).
+    -- Crafting-CPUs (Live: busy/idle) - nur ME.
     local cpus = call(b, "getCraftingCPUs")
     local list, busy = {}, 0
     if type(cpus) == "table" then
@@ -278,11 +344,12 @@ local function collectSlow()
     local b = state.bridge
     if not b then return end
     local d = state.data
+    local isRS = state.bridgeKind == "rs"
 
-    -- Alle Items -> Gesamtzahl, Typen, Top-Verbraucher.
+    -- Alle Items -> Gesamtzahl, Typen, Top-Verbraucher, craftbare Anzahl.
     local items = call(b, "listItems")
     local flat = {}
-    local totalCount, typeCount = 0, 0
+    local totalCount, typeCount, craftableCount = 0, 0, 0
     if type(items) == "table" then
         for _, item in pairs(items) do
             if type(item) == "table" then
@@ -290,6 +357,7 @@ local function collectSlow()
                 if amount > 0 then
                     typeCount = typeCount + 1
                     totalCount = totalCount + amount
+                    if item.isCraftable then craftableCount = craftableCount + 1 end
                     flat[#flat + 1] = {
                         name = item.name,
                         display = item.displayName or prettify(item.name),
@@ -310,37 +378,59 @@ local function collectSlow()
     end
     d.consumers = consumers
 
-    -- Rezepte / Patterns = Anzahl craftbarer Items (+ Fluids).
+    -- Fluids (Summe der Mengen) - fuer RS als Belegung genutzt.
+    local fluids = call(b, "listFluid") or call(b, "listFluids")
+    local fluidSum = 0
+    if type(fluids) == "table" then
+        for _, f in pairs(fluids) do
+            if type(f) == "table" then fluidSum = fluidSum + num(f.amount or f.count) end
+        end
+    end
+    d.fluidUsedLive = fluidSum
+    if isRS then
+        d.itemUsed = totalCount
+        d.fluidUsed = fluidSum
+    end
+
+    -- Rezepte / Patterns:
+    --  Erst die dedizierte Liste probieren, sonst craftbare Items aus listItems
+    --  zaehlen (funktioniert bei ME und RS unabhaengig von der API-Version).
     local craftItems = call(b, "listCraftableItems")
-    local craftFluid = call(b, "listCraftableFluid")
+    local craftFluid = call(b, "listCraftableFluid") or call(b, "listCraftableFluids")
     local patterns = 0
     if type(craftItems) == "table" then for _ in pairs(craftItems) do patterns = patterns + 1 end end
     if type(craftFluid) == "table" then for _ in pairs(craftFluid) do patterns = patterns + 1 end end
+    if patterns == 0 then patterns = craftableCount end
     d.patterns = patterns
 
-    -- Platten / Zellen: nach Zelltyp gruppieren.
-    local cells = call(b, "listCells")
-    local grouped, order = {}, {}
-    local cellCount = 0
-    if type(cells) == "table" then
-        for _, cell in pairs(cells) do
-            if type(cell) == "table" then
-                cellCount = cellCount + 1
-                local key = tostring(cell.item or "unbekannt")
-                if not grouped[key] then
-                    grouped[key] = { name = prettify(key), count = 0, totalBytes = 0, cellType = cell.cellType or "?" }
-                    order[#order + 1] = key
+    -- Platten / Zellen: nur ME (RS hat kein listCells).
+    if isRS then
+        d.cells = {}
+        d.cellCount = 0
+    else
+        local cells = call(b, "listCells")
+        local grouped, order = {}, {}
+        local cellCount = 0
+        if type(cells) == "table" then
+            for _, cell in pairs(cells) do
+                if type(cell) == "table" then
+                    cellCount = cellCount + 1
+                    local key = tostring(cell.item or "unbekannt")
+                    if not grouped[key] then
+                        grouped[key] = { name = prettify(key), count = 0, totalBytes = 0, cellType = cell.cellType or "?" }
+                        order[#order + 1] = key
+                    end
+                    grouped[key].count = grouped[key].count + 1
+                    grouped[key].totalBytes = grouped[key].totalBytes + num(cell.totalBytes)
                 end
-                grouped[key].count = grouped[key].count + 1
-                grouped[key].totalBytes = grouped[key].totalBytes + num(cell.totalBytes)
             end
         end
+        local cellList = {}
+        for _, key in ipairs(order) do cellList[#cellList + 1] = grouped[key] end
+        table.sort(cellList, function(a, c) return a.totalBytes > c.totalBytes end)
+        d.cells = cellList
+        d.cellCount = cellCount
     end
-    local cellList = {}
-    for _, key in ipairs(order) do cellList[#cellList + 1] = grouped[key] end
-    table.sort(cellList, function(a, c) return a.totalBytes > c.totalBytes end)
-    d.cells = cellList
-    d.cellCount = cellCount
 end
 
 -- ---------------------------------------------------------------------------
@@ -358,8 +448,9 @@ local function buildStatusLines(width)
     do
         local pct = d.energyMax > 0 and math.floor((d.energyStored / d.energyMax) * 100) or 0
         add({ kind = "header", text = "ENERGIE" })
-        add({ kind = "text", text = string.format("%s / %s AE   (%s AE/t)",
-            formatThousands(d.energyStored), formatThousands(d.energyMax), humanize(d.energyUsage)) })
+        add({ kind = "text", text = string.format("%s / %s %s   (%s %s/t)",
+            formatThousands(d.energyStored), formatThousands(d.energyMax), d.energyUnit,
+            humanize(d.energyUsage), d.energyUnit) })
         add({ kind = "bar", percent = pct, color = colors.orange })
     end
 
@@ -367,8 +458,8 @@ local function buildStatusLines(width)
     do
         local pct = d.itemTotal > 0 and math.floor((d.itemUsed / d.itemTotal) * 100) or 0
         add({ kind = "header", text = "ITEM-SPEICHER" })
-        add({ kind = "text", text = string.format("%s / %s Bytes   (%d Typen, %s Stk.)",
-            humanize(d.itemUsed), humanize(d.itemTotal), d.itemTypes, humanize(d.itemTotalCount)) })
+        add({ kind = "text", text = string.format("%s / %s %s   (%d Typen, %s Stk.)",
+            humanize(d.itemUsed), humanize(d.itemTotal), d.itemUnit, d.itemTypes, humanize(d.itemTotalCount)) })
         add({ kind = "bar", percent = pct, color = colors.green })
     end
 
@@ -381,19 +472,24 @@ local function buildStatusLines(width)
         add({ kind = "bar", percent = pct, color = colors.lightBlue })
     end
 
-    -- Crafting-CPUs.
-    add({ kind = "header", text = string.format("CRAFTING-CPUS  (Busy %d/%d)", d.cpuBusy, #d.cpus) })
-    if #d.cpus == 0 then
-        add({ kind = "text", text = "Keine Crafting-CPUs gefunden." })
+    -- Crafting-CPUs (nur ME; RS hat keine CPU-API).
+    if not d.cpuSupported then
+        add({ kind = "header", text = "CRAFTING-CPUS" })
+        add({ kind = "text", text = "n/a (Refined Storage stellt keine CPU-Daten bereit)", color = colors.gray })
     else
-        for _, cpu in ipairs(d.cpus) do
-            local statusText = cpu.isBusy and "CRAFTET" or "frei"
-            local col = cpu.isBusy and colors.yellow or colors.lightGray
-            local base = string.format("%s: %s  co:%d  mem:%s",
-                cpu.name, statusText, cpu.coProcessors, humanize(cpu.storage))
-            add({ kind = "text", text = base, color = col })
-            if cpu.isBusy and cpu.craftName then
-                add({ kind = "text", text = "   -> " .. cpu.craftName, color = colors.yellow })
+        add({ kind = "header", text = string.format("CRAFTING-CPUS  (Busy %d/%d)", d.cpuBusy, #d.cpus) })
+        if #d.cpus == 0 then
+            add({ kind = "text", text = "Keine Crafting-CPUs gefunden." })
+        else
+            for _, cpu in ipairs(d.cpus) do
+                local statusText = cpu.isBusy and "CRAFTET" or "frei"
+                local col = cpu.isBusy and colors.yellow or colors.lightGray
+                local base = string.format("%s: %s  co:%d  mem:%s",
+                    cpu.name, statusText, cpu.coProcessors, humanize(cpu.storage))
+                add({ kind = "text", text = base, color = col })
+                if cpu.isBusy and cpu.craftName then
+                    add({ kind = "text", text = "   -> " .. cpu.craftName, color = colors.yellow })
+                end
             end
         end
     end
@@ -401,9 +497,13 @@ local function buildStatusLines(width)
     -- System-Infos.
     add({ kind = "header", text = "SYSTEM" })
     add({ kind = "text", text = string.format("Rezepte/Patterns: %s", formatThousands(d.patterns)) })
-    add({ kind = "row", text = string.format("Platten: %d  (%d Typen)  antippen ->", d.cellCount, #d.cells),
-        click = { kind = "cells" }, color = colors.white })
-    add({ kind = "text", text = "AE2-Kanaele/Subnets: n/a (nicht per ME-Bridge abrufbar)", color = colors.gray })
+    if d.cellsSupported then
+        add({ kind = "row", text = string.format("Platten: %d  (%d Typen)  antippen ->", d.cellCount, #d.cells),
+            click = { kind = "cells" }, color = colors.white })
+        add({ kind = "text", text = "AE2-Kanaele/Subnets: n/a (nicht per ME-Bridge abrufbar)", color = colors.gray })
+    else
+        add({ kind = "text", text = "Platten/Zellen: n/a (Refined Storage)", color = colors.gray })
+    end
 
     -- Top-Verbraucher (anklickbar).
     add({ kind = "header", text = "GROESSTE VERBRAUCHER" })
@@ -438,6 +538,8 @@ end
 local function renderStatus(c, width, height)
     renderHeader(c, width, cfg.title)
     writeAt(c, 2, 2, trim(cfg.subtitle, width - 2), colors.cyan, colors.black)
+    local kindLabel = state.bridgeKind == "rs" and "RS" or (state.bridgeKind == "me" and "ME" or "?")
+    writeAt(c, math.max(1, width - #kindLabel - 1), 2, kindLabel, colors.lightGray, colors.black)
 
     local top    = 4
     local bottom = height - 1
@@ -614,10 +716,8 @@ end
 -- ---------------------------------------------------------------------------
 
 local function ensureBridge()
-    if not state.bridge then
-        state.bridge = findBridge()
-    end
-    return state.bridge ~= nil
+    if not state.bridge then return selectBridge() end
+    return true
 end
 
 local function main()
@@ -625,8 +725,8 @@ local function main()
     attachMonitor()
 
     if not ensureBridge() then
-        print("[ME] Keine ME Bridge gefunden. Bitte ME Bridge daneben setzen")
-        print("     oder per Wired Modem verbinden. Warte...")
+        print("[ME] Keine ME/RS Bridge gefunden. Bitte ME- oder RS-Bridge daneben")
+        print("     setzen oder per Wired Modem verbinden. Warte...")
     end
 
     -- Erstbefuellung.
@@ -664,7 +764,7 @@ local function main()
 
         elseif event == "peripheral" or event == "peripheral_detach" then
             -- Hotplug: Monitor/Bridge neu suchen.
-            state.bridge = findBridge()
+            selectBridge()
             attachMonitor()
             render()
 

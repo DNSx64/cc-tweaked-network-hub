@@ -81,6 +81,8 @@ end
 
 local state = {
     bridge   = nil,
+    bridgeKind = nil,  -- "me" | "rs"
+    bridgeName = nil,
     monitor  = nil,
     canvas   = nil,
     allItems = {},     -- vollstaendige, sortierte Liste
@@ -129,7 +131,47 @@ local function findByType(...)
     return nil
 end
 
-local function findBridge() return findByType("meBridge", "me_bridge") end
+-- Findet ALLE ME-/RS-Bridges im Netzwerk (der User kann beide haben).
+local function listBridges()
+    local out = {}
+    local wanted = { "meBridge", "me_bridge", "rsBridge", "rs_bridge" }
+    for _, pname in ipairs(peripheral.getNames()) do
+        local types = table.pack(peripheral.getType(pname))
+        for i = 1, types.n do
+            local nt = normalizeTypeName(types[i])
+            for _, want in ipairs(wanted) do
+                if nt == normalizeTypeName(want) then
+                    local ok, dev = pcall(peripheral.wrap, pname)
+                    if ok and type(dev) == "table" then
+                        out[#out + 1] = { dev = dev, kind = nt:find("me") and "me" or "rs", name = pname }
+                    end
+                    break
+                end
+            end
+        end
+    end
+    return out
+end
+
+-- Waehlt automatisch die Bridge mit den MEISTEN Items (so wird das volle RS-
+-- System bevorzugt, nicht eine leere ME Bridge).
+local function selectBridge()
+    local bridges = listBridges()
+    local best, bestCount = nil, -1
+    for _, b in ipairs(bridges) do
+        local items = call(b.dev, "listItems")
+        local n = 0
+        if type(items) == "table" then for _ in pairs(items) do n = n + 1 end end
+        if n > bestCount then best, bestCount = b, n end
+    end
+    if best then
+        state.bridge     = best.dev
+        state.bridgeKind = best.kind
+        state.bridgeName = best.name
+    end
+    return state.bridge ~= nil
+end
+
 local function findMonitor() return findByType("monitor") end
 
 -- ---------------------------------------------------------------------------
@@ -174,6 +216,15 @@ local function refreshItems()
     state.online = true
 
     local items = call(b, "listItems")
+    -- Liefert die aktuelle Bridge nichts, aber es gibt evtl. eine andere (z. B.
+    -- RS statt leerer ME): neu waehlen und erneut versuchen.
+    if type(items) ~= "table" or next(items) == nil then
+        if selectBridge() and state.bridge ~= b then
+            b = state.bridge
+            items = call(b, "listItems")
+        end
+    end
+
     local flat = {}
     local total = 0
     if type(items) == "table" then
@@ -241,7 +292,8 @@ local function render()
         c.setBackgroundColor(colors.black)
 
         writeAt(c, 2, 2, trim(cfg.subtitle, width - 2), colors.cyan, colors.black)
-        local info = string.format("%d Typen  |  %s Stk.", #state.view, formatThousands(state.totalCount))
+        local kindLabel = state.bridgeKind == "rs" and "RS" or (state.bridgeKind == "me" and "ME" or "?")
+        local info = string.format("%s | %d Typen | %s Stk.", kindLabel, #state.view, formatThousands(state.totalCount))
         writeAt(c, math.max(1, width - #info), 2, info, colors.lightGray, colors.black)
 
         if state.query ~= "" then
@@ -382,8 +434,9 @@ end
 -- ---------------------------------------------------------------------------
 
 local function ensureBridge()
-    if not state.bridge then state.bridge = findBridge() end
-    return state.bridge ~= nil
+    -- Bridge (neu) waehlen, wenn keine da ist ODER die aktuelle nichts liefert.
+    if not state.bridge then return selectBridge() end
+    return true
 end
 
 local function main()
@@ -425,7 +478,7 @@ local function main()
             render()
 
         elseif event == "peripheral" or event == "peripheral_detach" then
-            state.bridge = findBridge()
+            selectBridge()
             attachMonitor()
             if ensureBridge() then pcall(refreshItems) end
             render()
