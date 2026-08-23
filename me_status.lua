@@ -19,7 +19,7 @@
 --  Bytes) und getItems (Top-Verbraucher) bestmoeglich hergeleitet.
 -- ============================================================================
 
-local SCRIPT_VERSION = "2.0"
+local SCRIPT_VERSION = "2.1"
 
 local cfg = {
     title        = "ME SYSTEM",
@@ -201,14 +201,15 @@ local state = {
         energyUnit = "AE",
         itemUsed = 0, itemTotal = 0, itemUnit = "Bytes",
         fluidUsed = 0, fluidTotal = 0,
-        cpus = {}, cpuBusy = 0, cpuSupported = true,
-        patterns = 0,
+        cpus = {}, cpuBusy = 0, cpuStorage = 0, cpuCoProcessors = 0,
+        cpuSupported = true,
+        patterns = 0, craftableTypes = 0,
         cells = {},        -- gruppiert: { {name, count, totalBytes, cellType}, ... }
         cellCount = 0, cellsSupported = true,
         consumers = {},     -- { {name, display, amount, craftable}, ... }
         categories = {},
         history = {},
-        itemTypes = 0, itemTotalCount = 0,
+        itemTypes = 0, itemTotalCount = 0, fluidTypes = 0,
         online = false,
     },
 }
@@ -516,6 +517,8 @@ local function collectFast()
         d.cellsSupported = type(b.getCells) == "function" or type(b.listCells) == "function"
         d.cpus = {}
         d.cpuBusy = 0
+        d.cpuStorage = 0
+        d.cpuCoProcessors = 0
         return
     end
 
@@ -530,7 +533,7 @@ local function collectFast()
 
     -- Crafting-CPUs (Live: busy/idle) - nur ME.
     local cpus = call(b, "getCraftingCPUs")
-    local list, busy = {}, 0
+    local list, busy, totalStorage, totalCoProcessors = {}, 0, 0, 0
     if type(cpus) == "table" then
         local idx = 0
         for _, cpu in pairs(cpus) do
@@ -547,6 +550,8 @@ local function collectFast()
                     craftName = craftingItem.displayName or prettify(craftingItem.name)
                 end
                 if cpu.isBusy then busy = busy + 1 end
+                totalStorage = totalStorage + num(cpu.storage)
+                totalCoProcessors = totalCoProcessors + num(cpu.coProcessors)
                 list[idx] = {
                     name = name,
                     storage = num(cpu.storage),
@@ -559,6 +564,8 @@ local function collectFast()
     end
     d.cpus = list
     d.cpuBusy = busy
+    d.cpuStorage = totalStorage
+    d.cpuCoProcessors = totalCoProcessors
 end
 
 local function collectSlow()
@@ -575,10 +582,10 @@ local function collectSlow()
         for _, item in pairs(items) do
             if type(item) == "table" then
                 local amount = num(item.amount or item.count)
+                if item.isCraftable then craftableCount = craftableCount + 1 end
                 if amount > 0 then
                     typeCount = typeCount + 1
                     totalCount = totalCount + amount
-                    if item.isCraftable then craftableCount = craftableCount + 1 end
                     flat[#flat + 1] = {
                         name = item.name,
                         display = cleanItemLabel(item.displayName or prettify(item.name)),
@@ -592,6 +599,7 @@ local function collectSlow()
     table.sort(flat, function(a, c) return a.amount > c.amount end)
     d.itemTotalCount = totalCount
     d.itemTypes = typeCount
+    d.craftableTypes = craftableCount
     d.categories = summarizeCategories(flat)
 
     local history = d.history
@@ -606,13 +614,17 @@ local function collectSlow()
 
     -- Fluids (Summe der Mengen) - fuer RS als Belegung genutzt.
     local fluids = call(b, "getFluids", {}) or call(b, "listFluid") or call(b, "listFluids")
-    local fluidSum = 0
+    local fluidSum, fluidTypes = 0, 0
     if type(fluids) == "table" then
         for _, f in pairs(fluids) do
-            if type(f) == "table" then fluidSum = fluidSum + num(f.amount or f.count) end
+            if type(f) == "table" then
+                fluidSum = fluidSum + num(f.amount or f.count)
+                fluidTypes = fluidTypes + 1
+            end
         end
     end
     d.fluidUsedLive = fluidSum
+    d.fluidTypes = fluidTypes
     if isRS then
         d.itemUsed = totalCount
         d.fluidUsed = fluidSum
@@ -691,8 +703,9 @@ local function buildStatusLines(width)
     do
         local pct = d.itemTotal > 0 and math.floor((d.itemUsed / d.itemTotal) * 100) or 0
         add({ kind = "header", text = "ITEM-SPEICHER", color = colors.lime })
-        add({ kind = "text", text = string.format("%s / %s %s   (%d Typen, %s Stk.)",
-            humanize(d.itemUsed), humanize(d.itemTotal), d.itemUnit, d.itemTypes, humanize(d.itemTotalCount)) })
+        add({ kind = "text", text = string.format("%s / %s %s   (%d Typen, %d craftbar, %s Stk.)",
+            humanize(d.itemUsed), humanize(d.itemTotal), d.itemUnit, d.itemTypes,
+            d.craftableTypes, humanize(d.itemTotalCount)) })
         add({ kind = "bar", percent = pct, color = colors.green })
     end
 
@@ -700,8 +713,8 @@ local function buildStatusLines(width)
     do
         local pct = d.fluidTotal > 0 and math.floor((d.fluidUsed / d.fluidTotal) * 100) or 0
         add({ kind = "header", text = "FLUID-SPEICHER", color = colors.lightBlue })
-        add({ kind = "text", text = string.format("%s / %s mB",
-            humanize(d.fluidUsed), humanize(d.fluidTotal)) })
+        add({ kind = "text", text = string.format("%s / %s mB   (%d Typen)",
+            humanize(d.fluidUsed), humanize(d.fluidTotal), d.fluidTypes) })
         add({ kind = "bar", percent = pct, color = colors.lightBlue })
     end
 
@@ -715,6 +728,8 @@ local function buildStatusLines(width)
         if #d.cpus == 0 then
             add({ kind = "text", text = "Keine Crafting-CPUs gefunden." })
         else
+            add({ kind = "text", text = string.format("Gesamt: %s Bytes  |  %d Co-Prozessoren",
+                humanize(d.cpuStorage), d.cpuCoProcessors), color = colors.lightGray })
             for _, cpu in ipairs(d.cpus) do
                 local statusText = cpu.isBusy and "CRAFTET" or "frei"
                 local col = cpu.isBusy and colors.yellow or colors.lightGray
@@ -730,7 +745,8 @@ local function buildStatusLines(width)
 
     -- System-Infos.
     add({ kind = "header", text = "SYSTEM", color = colors.cyan })
-    add({ kind = "text", text = string.format("Rezepte/Patterns: %s", formatThousands(d.patterns)) })
+    add({ kind = "text", text = string.format("Patterns: %s  |  Craftbare Typen: %d",
+        formatThousands(d.patterns), d.craftableTypes) })
     if d.cellsSupported then
         add({ kind = "row", text = string.format("Platten: %d  (%d Typen)  antippen ->", d.cellCount, #d.cells),
             click = { kind = "cells" }, color = colors.white })
@@ -870,6 +886,20 @@ local function renderStatusDashboard(c, width, height)
     local storagePercent = d.itemTotal > 0 and math.floor((d.itemUsed / d.itemTotal) * 100 + 0.5) or 0
     if d.itemUsed > 0 and storagePercent == 0 then storagePercent = 1 end
     storagePercent = math.max(0, math.min(100, storagePercent))
+    local freeStorage = math.max(0, d.itemTotal - d.itemUsed)
+    local energyPercent = d.energyMax > 0
+        and math.max(0, math.min(100, math.floor((d.energyStored / d.energyMax) * 100 + 0.5))) or 0
+    local fluidPercent = d.fluidTotal > 0
+        and math.max(0, math.min(100, math.floor((d.fluidUsed / d.fluidTotal) * 100 + 0.5))) or 0
+    local energyColor = colors.lime
+    if d.energyMax <= 0 then energyColor = colors.gray
+    elseif energyPercent <= 10 then energyColor = colors.red
+    elseif energyPercent <= 25 then energyColor = colors.orange
+    elseif energyPercent <= 50 then energyColor = colors.yellow end
+    local fluidColor = colors.lightBlue
+    if d.fluidTotal <= 0 then fluidColor = colors.gray
+    elseif fluidPercent >= 95 then fluidColor = colors.red
+    elseif fluidPercent >= 80 then fluidColor = colors.orange end
     local healthText, healthColor = "HEALTHY", colors.lime
     if not d.online then healthText, healthColor = "OFFLINE", colors.red
     elseif storagePercent >= 95 then healthText, healthColor = "FULL", colors.red
@@ -881,23 +911,30 @@ local function renderStatusDashboard(c, width, height)
     writeAt(c, 2, 7, healthText, healthColor, colors.black)
 
     local statsX = math.max(18, bigWidth + 5)
-    local statsWidth = math.max(8, width - statsX)
-    local storageLine = string.format("%s / %s %s USED",
-        humanize(d.itemUsed), humanize(d.itemTotal), d.itemUnit)
+    local statsWidth = math.max(8, width - statsX + 1)
+    local storageLine = string.format("%s / %s %s USED  |  %s FREE",
+        humanize(d.itemUsed), humanize(d.itemTotal), d.itemUnit, humanize(freeStorage))
     writeAt(c, statsX, 2, trim(storageLine, statsWidth), colors.white, colors.black)
     drawThinBar(c, statsX, 3, statsWidth, storagePercent / 100, healthColor, colors.gray)
     writeAt(c, statsX, 4,
-        trim(string.format("%s ITEMS  |  %d TYPES", formatThousands(d.itemTotalCount), d.itemTypes), statsWidth),
+        trim(string.format("%s ITEMS  |  %d TYPES  |  %d CRAFTABLE",
+            formatThousands(d.itemTotalCount), d.itemTypes, d.craftableTypes), statsWidth),
         colors.lightGray, colors.black)
     writeAt(c, statsX, 5,
-        trim(string.format("ENERGY %s/%s %s  |  %s/t", humanize(d.energyStored), humanize(d.energyMax),
-            d.energyUnit, humanize(d.energyUsage)), statsWidth), colors.lightGray, colors.black)
+        trim(string.format("ENERGY %d%%  |  %s/%s %s  |  %s/t", energyPercent,
+            humanize(d.energyStored), humanize(d.energyMax), d.energyUnit, humanize(d.energyUsage)), statsWidth),
+        energyColor, colors.black)
     writeAt(c, statsX, 6,
-        trim(string.format("PATTERNS %s  |  CELLS %d", formatThousands(d.patterns), d.cellCount), statsWidth),
-        colors.lightGray, colors.black)
-    local cpuText = d.cpuSupported and string.format("CRAFTING %d/%d BUSY", d.cpuBusy, #d.cpus)
-        or "CRAFTING DATA N/A"
-    writeAt(c, statsX, 7, trim(cpuText, statsWidth), d.cpuBusy > 0 and colors.yellow or colors.gray, colors.black)
+        trim(string.format("FLUID %d%%  |  %s/%s mB  |  %d TYPES", fluidPercent,
+            humanize(d.fluidUsed), humanize(d.fluidTotal), d.fluidTypes), statsWidth),
+        fluidColor, colors.black)
+    local systemText = string.format("PATTERNS %s  |  CELLS %d/%d TYPES",
+        formatThousands(d.patterns), d.cellCount, #d.cells)
+    if d.cpuSupported then
+        systemText = systemText .. string.format("  |  CPU %d/%d", d.cpuBusy, #d.cpus)
+    end
+    writeAt(c, statsX, 7, trim(systemText, statsWidth),
+        d.cpuBusy > 0 and colors.yellow or colors.lightGray, colors.black)
 
     -- Zusammensetzung.
     fillLine(c, 8, width, colors.black)
@@ -908,22 +945,30 @@ local function renderStatusDashboard(c, width, height)
 
     -- Rollender Verlauf. Der untere Bereich behaelt immer genug Platz fuer Tabellen.
     local trendTitleY = 12
-    local lowerTitleY = math.max(17, height - 8)
+    local lowerTitleY = math.max(15, height - 10)
     local chartY = trendTitleY + 1
     local chartHeight = math.max(2, lowerTitleY - chartY)
     writeAt(c, 2, trendTitleY, "ITEM TREND", colors.gray, colors.black)
     local trendRange = ""
     if #d.history > 0 then
-        trendRange = string.format("%s -> %s", humanize(d.history[1]), humanize(d.history[#d.history]))
+        local trendMin, trendMax = d.history[1], d.history[1]
+        for index = 2, #d.history do
+            trendMin = math.min(trendMin, d.history[index])
+            trendMax = math.max(trendMax, d.history[index])
+        end
+        local delta = d.history[#d.history] - d.history[1]
+        local deltaText = (delta >= 0 and "+" or "") .. humanize(delta)
+        trendRange = trim(string.format("MIN %s | MAX %s | DELTA %s",
+            humanize(trendMin), humanize(trendMax), deltaText), math.max(1, width - 14))
         writeAt(c, math.max(2, width - #trendRange + 1), trendTitleY,
-            trim(trendRange, width - 1), colors.gray, colors.black)
+            trendRange, delta < 0 and colors.orange or colors.gray, colors.black)
     end
     drawHistory(c, 2, chartY, math.max(1, width - 3), chartHeight, d.history)
 
     -- Untere Zweispaltenansicht.
     local splitX = math.floor(width * 0.60)
     writeAt(c, 2, lowerTitleY, "TOP CONSUMERS", colors.gray, colors.black)
-    writeAt(c, splitX + 1, lowerTitleY, "SYSTEM LOAD", colors.gray, colors.black)
+    writeAt(c, splitX + 1, lowerTitleY, "SYSTEM OVERVIEW", colors.gray, colors.black)
     local listStart, listEnd = lowerTitleY + 1, height - 2
     local leftEnd = splitX - 2
     local leftWidth = math.max(12, leftEnd - 1)
@@ -955,14 +1000,22 @@ local function renderStatusDashboard(c, width, height)
     local rightX, rightEnd = splitX + 1, width - 1
     local rightWidth = math.max(8, rightEnd - rightX + 1)
     local metrics = {
-        { "CRAFTING", d.cpuSupported and string.format("%d/%d", d.cpuBusy, #d.cpus) or "N/A",
-            d.cpuBusy > 0 and colors.yellow or colors.lime },
-        { "PATTERNS", formatThousands(d.patterns), colors.magenta },
-        { "CELLS", tostring(d.cellCount), colors.lightBlue, "cells" },
-        { "ENERGY/T", humanize(d.energyUsage), colors.orange },
-        { "BRIDGE", state.bridgeKind == "rs" and "RS" or "ME", colors.cyan },
-        { "STATUS", healthText, healthColor },
+        { "FREE", humanize(freeStorage), healthColor },
+        { "ENERGY", energyPercent .. "%", energyColor },
+        { "FLUID", d.fluidTotal > 0 and (fluidPercent .. "%") or "N/A", fluidColor },
+        { "CRAFTABLE", tostring(d.craftableTypes), colors.magenta },
     }
+    if d.cpuSupported then
+        metrics[#metrics + 1] = { "CRAFTING", string.format("%d/%d", d.cpuBusy, #d.cpus),
+            d.cpuBusy > 0 and colors.yellow or colors.lime }
+    end
+    metrics[#metrics + 1] = { "CELLS", string.format("%d/%dT", d.cellCount, #d.cells),
+        d.cellsSupported and colors.lightBlue or colors.gray, d.cellsSupported and "cells" or nil }
+    if d.cpuSupported then
+        metrics[#metrics + 1] = { "CPU MEM/CO", humanize(d.cpuStorage) .. "/" .. d.cpuCoProcessors,
+            colors.cyan }
+    end
+    metrics[#metrics + 1] = { "BRIDGE", trim(state.bridgeName or "?", math.max(1, rightWidth - 8)), colors.cyan }
     for index = 1, math.min(#metrics, listEnd - listStart + 1) do
         local metric = metrics[index]
         local y = listStart + index - 1
@@ -978,13 +1031,41 @@ local function renderStatusDashboard(c, width, height)
 
     -- Eine kompakte Alarmzeile statt dekorativer Karten.
     local alertY = height - 1
-    local alertText, alertColor = "No active alerts", colors.lime
-    if not d.online then alertText, alertColor = "Bridge offline", colors.red
-    elseif storagePercent >= 95 then alertText, alertColor = "Item storage is full", colors.red
-    elseif storagePercent >= 80 then alertText, alertColor = "Item storage above 80%", colors.orange
-    elseif d.cpuBusy > 0 then alertText, alertColor = string.format("%d crafting CPU(s) active", d.cpuBusy), colors.yellow end
+    local alerts = {}
+    local alertColor = colors.lime
+    if not d.online then
+        alerts[#alerts + 1] = "Bridge offline"
+        alertColor = colors.red
+    else
+        if storagePercent >= 95 then
+            alerts[#alerts + 1] = "Item storage full"
+            alertColor = colors.red
+        elseif storagePercent >= 80 then
+            alerts[#alerts + 1] = "Item storage above 80%"
+            alertColor = colors.orange
+        end
+        if d.energyMax > 0 and energyPercent <= 10 then
+            alerts[#alerts + 1] = "Energy below 10%"
+            alertColor = colors.red
+        elseif d.energyMax > 0 and energyPercent <= 25 then
+            alerts[#alerts + 1] = "Energy below 25%"
+            if alertColor ~= colors.red then alertColor = colors.orange end
+        end
+        if d.fluidTotal > 0 and fluidPercent >= 95 then
+            alerts[#alerts + 1] = "Fluid storage full"
+            alertColor = colors.red
+        elseif d.fluidTotal > 0 and fluidPercent >= 80 then
+            alerts[#alerts + 1] = "Fluid storage above 80%"
+            if alertColor ~= colors.red then alertColor = colors.orange end
+        end
+    end
+    if #alerts == 0 and d.cpuBusy > 0 then
+        alerts[1] = string.format("%d crafting CPU(s) active", d.cpuBusy)
+        alertColor = colors.yellow
+    end
+    local alertText = #alerts > 0 and table.concat(alerts, " | ") or "No active alerts"
     fillLine(c, alertY, width, colors.black)
-    writeAt(c, 1, alertY, " ALERTS ", colors.black, colors.orange)
+    writeAt(c, 1, alertY, " ALERTS ", colors.black, alertColor)
     writeAt(c, 10, alertY, trim(alertText, math.max(1, width - 9)), alertColor, colors.black)
 
     -- Funktionale Tab-Leiste.
