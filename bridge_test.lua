@@ -129,7 +129,7 @@ end
 --  Test-Ablauf
 -- ---------------------------------------------------------------------------
 
-print("=== bridge_test v1.3 ===")
+print("=== bridge_test v1.4 ===")
 if monitor then
     print("(Ausgabe auf Monitor: " .. peripheral.getName(monitor) .. ")")
 end
@@ -202,6 +202,40 @@ for idx, b in ipairs(bridges) do
                 end
             end
         end
+    end
+
+    -- Falls listItems fehlt (neues AP-Bridge-System): andere Namen probieren.
+    print("  Kandidaten fuer Item-Liste:")
+    local candidates = {
+        "listItems", "items", "getItems", "getItemList", "getAllItems",
+        "getStoredItems", "getItemDetail", "list", "getItemsInStorage",
+    }
+    for _, m in ipairs(candidates) do
+        if type(b.dev[m]) == "function" then
+            local res = call(b.dev, m)
+            if type(res) == "table" then
+                printf("     %-20s -> OK, %d Eintraege", m, countEntries(res))
+            else
+                printf("     %-20s -> vorhanden, liefert %s", m, type(res))
+            end
+        end
+    end
+
+    -- ALLE verfuegbaren Methoden der Bridge auflisten (das zeigt die echten
+    -- Namen des neuen Bridge-Systems).
+    local methods = peripheral.getMethods(b.name)
+    if type(methods) == "table" then
+        table.sort(methods)
+        printf("  Verfuegbare Methoden (%d):", #methods)
+        local line = "    "
+        for _, m in ipairs(methods) do
+            if #line + #m + 2 > 50 then
+                print(line)
+                line = "    "
+            end
+            line = line .. m .. ", "
+        end
+        if line ~= "    " then print(line) end
     end
 
     print("")
