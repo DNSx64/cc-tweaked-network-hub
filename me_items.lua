@@ -20,7 +20,7 @@
 --  WICHTIG (CC:Tweaked): Peripherals UND window-Objekte OHNE self aufrufen.
 -- ============================================================================
 
-local SCRIPT_VERSION = "1.1"
+local SCRIPT_VERSION = "1.2"
 
 local cfg = {
     title        = "ME DASHBOARD / ITEMS",
@@ -76,6 +76,14 @@ local function prettify(id)
     end
     if #parts == 0 then return afterColon end
     return table.concat(parts, "_")
+end
+
+local function cleanItemLabel(value)
+    local label = tostring(value or "?"):gsub("^%s+", ""):gsub("%s+$", "")
+    while #label >= 2 and label:sub(1, 1) == "[" and label:sub(-1) == "]" do
+        label = label:sub(2, -2):gsub("^%s+", ""):gsub("%s+$", "")
+    end
+    return label ~= "" and label or "?"
 end
 
 local function normalizeTypeName(value)
@@ -198,6 +206,21 @@ local function fillLine(c, y, width, bg)
     c.write(string.rep(" ", width))
 end
 
+local function amountColor(amount)
+    amount = num(amount)
+    if amount >= 1000000 then return colors.lightBlue end
+    if amount >= 10000 then return colors.cyan end
+    if amount >= 1000 then return colors.lime end
+    return colors.yellow
+end
+
+local function rankColor(rank)
+    if rank == 1 then return colors.yellow end
+    if rank == 2 then return colors.white end
+    if rank == 3 then return colors.orange end
+    return colors.cyan
+end
+
 local function createCanvas()
     local target = state.monitor or term.current()
     if state.monitor then
@@ -242,8 +265,9 @@ local function refreshItems()
                     total = total + amount
                     flat[#flat + 1] = {
                         name = item.name,
-                        display = item.displayName or prettify(item.name),
+                        display = cleanItemLabel(item.displayName or prettify(item.name)),
                         amount = amount,
+                        craftable = item.isCraftable and true or false,
                     }
                 end
             end
@@ -290,23 +314,34 @@ local function render()
     local ok, err = pcall(function()
         applyFilter()
 
-        -- Kopf.
-        fillLine(c, 1, width, colors.blue)
-        writeAt(c, 2, 1, trim(cfg.title, math.max(1, width - 10)), colors.white, colors.blue)
+        -- Kopf mit kompaktem Status-Badge.
         local st = state.online and "ONLINE" or "OFFLINE"
-        local stCol = state.online and colors.lime or colors.red
-        writeAt(c, math.max(1, width - #st), 1, st, stCol, colors.blue)
-        c.setBackgroundColor(colors.black)
+        local stBadge = " " .. st .. " "
+        local stBg = state.online and colors.green or colors.red
+        fillLine(c, 1, width, colors.purple)
+        writeAt(c, 2, 1, trim(cfg.title, math.max(1, width - #stBadge - 3)), colors.white, colors.purple)
+        writeAt(c, math.max(1, width - #stBadge + 1), 1, stBadge, colors.white, stBg)
 
-        writeAt(c, 2, 2, trim(cfg.subtitle, width - 2), colors.cyan, colors.black)
+        fillLine(c, 2, width, colors.gray)
+        local subtitle = trim(cfg.subtitle, math.max(1, width - 2))
+        writeAt(c, 2, 2, subtitle, colors.lightBlue, colors.gray)
         local kindLabel = state.bridgeKind == "rs" and "RS" or (state.bridgeKind == "me" and "ME" or "?")
-        local info = string.format("%s | %d Typen | %s Stk.", kindLabel, #state.view, formatThousands(state.totalCount))
-        writeAt(c, math.max(1, width - #info), 2, info, colors.lightGray, colors.black)
+        local info = string.format("%s  %d Typen  %s Stk.", kindLabel, #state.view, formatThousands(state.totalCount))
+        local infoX = width - #info
+        if infoX > #subtitle + 3 then
+            writeAt(c, infoX, 2, info, colors.yellow, colors.gray)
+        end
 
         if state.query ~= "" then
-            writeAt(c, 1, 3, trim("Suche: " .. state.query, width), colors.yellow, colors.black)
+            fillLine(c, 3, width, colors.gray)
+            writeAt(c, 1, 3, " SUCHE ", colors.black, colors.yellow)
+            writeAt(c, 9, 3, trim(state.query, math.max(1, width - 8)), colors.white, colors.gray)
         else
-            writeAt(c, 1, 3, string.rep("-", width), colors.gray, colors.black)
+            fillLine(c, 3, width, colors.lightGray)
+            writeAt(c, 1, 3, " #  ITEM", colors.black, colors.lightGray)
+            if width >= 18 then
+                writeAt(c, width - 5, 3, "MENGE", colors.black, colors.lightGray)
+            end
         end
 
         -- Listenbereich.
@@ -321,23 +356,29 @@ local function render()
         local y = top
         for i = startIdx, math.min(#state.view, startIdx + state.perPage - 1) do
             local it = state.view[i]
-            local amountText = formatThousands(it.amount)
+            local amountText = trim(formatThousands(it.amount), math.max(1, width - 5))
+            local amountX = math.max(4, width - #amountText + 1)
             local label = "[" .. it.display .. "]"
-            local maxLabel = math.max(4, width - #amountText - 1)
-            writeAt(c, 1, y, trim(label, maxLabel), colors.white, colors.black)
-            writeAt(c, math.max(1, width - #amountText), y, amountText, colors.lime, colors.black)
+            local rowBg = ((i - startIdx) % 2 == 0) and colors.black or colors.gray
+            local maxLabel = math.max(1, amountX - 5)
+            fillLine(c, y, width, rowBg)
+            writeAt(c, 1, y, string.format("%2d", i), rankColor(i), rowBg)
+            writeAt(c, 4, y, trim(label, maxLabel), it.craftable and colors.lightBlue or colors.white, rowBg)
+            writeAt(c, amountX, y, amountText, amountColor(it.amount), rowBg)
             y = y + 1
         end
         if #state.view == 0 then
-            writeAt(c, 1, top, "Keine Items gefunden.", colors.yellow, colors.black)
+            local emptyText = state.query ~= "" and "Keine Treffer fuer diese Suche." or "Keine Items im System."
+            writeAt(c, math.max(1, math.floor((width - #emptyText) / 2)), top + 1,
+                trim(emptyText, width), colors.orange, colors.black)
         end
 
         -- Fussleiste mit Buttons.
         state.buttons = {}
         fillLine(c, height, width, colors.gray)
 
-        local pageText = string.format("Seite %d/%d", state.page, state.pages)
-        writeAt(c, 2, height, pageText, colors.white, colors.gray)
+        local pageText = string.format(" %d/%d ", state.page, state.pages)
+        writeAt(c, 1, height, pageText, colors.white, colors.purple)
 
         local autoText
         if state.auto then
@@ -357,15 +398,15 @@ local function render()
         local xAuto   = xNext - #bAuto - 1
         local xPrev   = xAuto - #bPrev - 1
 
-        local function button(x, label, action)
-            if x < #pageText + 3 then return end   -- kein Platz -> weglassen
-            writeAt(c, x, height, label, colors.black, colors.lightGray)
+        local function button(x, label, action, fg, bg)
+            if x < #pageText + 2 then return end   -- kein Platz -> weglassen
+            writeAt(c, x, height, label, fg, bg)
             state.buttons[#state.buttons + 1] = { x1 = x, x2 = x + #label - 1, action = action }
         end
-        button(xPrev, bPrev, "prev")
-        button(xAuto, bAuto, "auto")
-        button(xNext, bNext, "next")
-        button(xSearch, bSearch, "search")
+        button(xPrev, bPrev, "prev", colors.black, colors.cyan)
+        button(xAuto, bAuto, "auto", colors.black, state.auto and colors.lime or colors.orange)
+        button(xNext, bNext, "next", colors.black, colors.cyan)
+        button(xSearch, bSearch, "search", colors.black, colors.yellow)
 
         c.setBackgroundColor(colors.black)
     end)

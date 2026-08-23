@@ -19,7 +19,7 @@
 --  Bytes) und getItems (Top-Verbraucher) bestmoeglich hergeleitet.
 -- ============================================================================
 
-local SCRIPT_VERSION = "1.2"
+local SCRIPT_VERSION = "1.3"
 
 local cfg = {
     title        = "ME SYSTEM",
@@ -97,6 +97,14 @@ local function prettify(id)
     end
     if #parts == 0 then return afterColon end
     return table.concat(parts, "_")
+end
+
+local function cleanItemLabel(value)
+    local label = tostring(value or "?"):gsub("^%s+", ""):gsub("%s+$", "")
+    while #label >= 2 and label:sub(1, 1) == "[" and label:sub(-1) == "]" do
+        label = label:sub(2, -2):gsub("^%s+", ""):gsub("%s+$", "")
+    end
+    return label ~= "" and label or "?"
 end
 
 local function normalizeTypeName(value)
@@ -227,6 +235,14 @@ local function fillLine(c, y, width, bg)
     c.setBackgroundColor(bg)
     c.setCursorPos(1, y)
     c.write(string.rep(" ", width))
+end
+
+local function amountColor(amount)
+    amount = num(amount)
+    if amount >= 1000000 then return colors.lightBlue end
+    if amount >= 10000 then return colors.cyan end
+    if amount >= 1000 then return colors.lime end
+    return colors.yellow
 end
 
 local function drawBar(c, x, y, width, percent, filled, empty)
@@ -379,7 +395,7 @@ local function collectSlow()
                     if item.isCraftable then craftableCount = craftableCount + 1 end
                     flat[#flat + 1] = {
                         name = item.name,
-                        display = item.displayName or prettify(item.name),
+                        display = cleanItemLabel(item.displayName or prettify(item.name)),
                         amount = amount,
                         craftable = item.isCraftable and true or false,
                     }
@@ -473,7 +489,7 @@ local function buildStatusLines(width)
     -- Energie.
     do
         local pct = d.energyMax > 0 and math.floor((d.energyStored / d.energyMax) * 100) or 0
-        add({ kind = "header", text = "ENERGIE" })
+        add({ kind = "header", text = "ENERGIE", color = colors.orange })
         add({ kind = "text", text = string.format("%s / %s %s   (%s %s/t)",
             formatThousands(d.energyStored), formatThousands(d.energyMax), d.energyUnit,
             humanize(d.energyUsage), d.energyUnit) })
@@ -483,7 +499,7 @@ local function buildStatusLines(width)
     -- Item-Speicher.
     do
         local pct = d.itemTotal > 0 and math.floor((d.itemUsed / d.itemTotal) * 100) or 0
-        add({ kind = "header", text = "ITEM-SPEICHER" })
+        add({ kind = "header", text = "ITEM-SPEICHER", color = colors.lime })
         add({ kind = "text", text = string.format("%s / %s %s   (%d Typen, %s Stk.)",
             humanize(d.itemUsed), humanize(d.itemTotal), d.itemUnit, d.itemTypes, humanize(d.itemTotalCount)) })
         add({ kind = "bar", percent = pct, color = colors.green })
@@ -492,7 +508,7 @@ local function buildStatusLines(width)
     -- Fluid-Speicher.
     do
         local pct = d.fluidTotal > 0 and math.floor((d.fluidUsed / d.fluidTotal) * 100) or 0
-        add({ kind = "header", text = "FLUID-SPEICHER" })
+        add({ kind = "header", text = "FLUID-SPEICHER", color = colors.lightBlue })
         add({ kind = "text", text = string.format("%s / %s mB",
             humanize(d.fluidUsed), humanize(d.fluidTotal)) })
         add({ kind = "bar", percent = pct, color = colors.lightBlue })
@@ -500,10 +516,11 @@ local function buildStatusLines(width)
 
     -- Crafting-CPUs (nur ME; RS hat keine CPU-API).
     if not d.cpuSupported then
-        add({ kind = "header", text = "CRAFTING-CPUS" })
+        add({ kind = "header", text = "CRAFTING-CPUS", color = colors.magenta })
         add({ kind = "text", text = "n/a (Refined Storage stellt keine CPU-Daten bereit)", color = colors.gray })
     else
-        add({ kind = "header", text = string.format("CRAFTING-CPUS  (Busy %d/%d)", d.cpuBusy, #d.cpus) })
+        add({ kind = "header", text = string.format("CRAFTING-CPUS  (Busy %d/%d)", d.cpuBusy, #d.cpus),
+            color = colors.magenta })
         if #d.cpus == 0 then
             add({ kind = "text", text = "Keine Crafting-CPUs gefunden." })
         else
@@ -521,7 +538,7 @@ local function buildStatusLines(width)
     end
 
     -- System-Infos.
-    add({ kind = "header", text = "SYSTEM" })
+    add({ kind = "header", text = "SYSTEM", color = colors.cyan })
     add({ kind = "text", text = string.format("Rezepte/Patterns: %s", formatThousands(d.patterns)) })
     if d.cellsSupported then
         add({ kind = "row", text = string.format("Platten: %d  (%d Typen)  antippen ->", d.cellCount, #d.cells),
@@ -532,16 +549,15 @@ local function buildStatusLines(width)
     end
 
     -- Top-Verbraucher (anklickbar).
-    add({ kind = "header", text = "GROESSTE VERBRAUCHER" })
+    add({ kind = "header", text = "GROESSTE VERBRAUCHER", color = colors.yellow })
     if #d.consumers == 0 then
         add({ kind = "text", text = "Keine Items im System." })
     else
         for _, it in ipairs(d.consumers) do
             local amountText = formatThousands(it.amount)
             local label = "[" .. it.display .. "]"
-            local maxLabel = math.max(4, width - #amountText - 3)
-            local text = string.format("%-" .. maxLabel .. "s %s", trim(label, maxLabel), amountText)
-            add({ kind = "row", text = text, click = { kind = "item", item = it }, color = colors.white })
+            add({ kind = "row", text = label, right = amountText, rightColor = amountColor(it.amount),
+                click = { kind = "item", item = it }, color = it.craftable and colors.lightBlue or colors.white })
         end
     end
 
@@ -553,19 +569,38 @@ end
 -- ---------------------------------------------------------------------------
 
 local function renderHeader(c, width, titleText)
-    fillLine(c, 1, width, colors.blue)
-    writeAt(c, 2, 1, trim(titleText, math.max(1, width - 10)), colors.white, colors.blue)
     local st = state.data.online and "ONLINE" or "OFFLINE"
-    local stCol = state.data.online and colors.lime or colors.red
-    writeAt(c, math.max(1, width - #st), 1, st, stCol, colors.blue)
+    local badge = " " .. st .. " "
+    local badgeBg = state.data.online and colors.green or colors.red
+    fillLine(c, 1, width, colors.purple)
+    writeAt(c, 2, 1, trim(titleText, math.max(1, width - #badge - 3)), colors.white, colors.purple)
+    writeAt(c, math.max(1, width - #badge + 1), 1, badge, colors.white, badgeBg)
     c.setBackgroundColor(colors.black)
 end
 
 local function renderStatus(c, width, height)
     renderHeader(c, width, cfg.title)
-    writeAt(c, 2, 2, trim(cfg.subtitle, width - 2), colors.cyan, colors.black)
+    fillLine(c, 2, width, colors.gray)
     local kindLabel = state.bridgeKind == "rs" and "RS" or (state.bridgeKind == "me" and "ME" or "?")
-    writeAt(c, math.max(1, width - #kindLabel - 1), 2, kindLabel, colors.lightGray, colors.black)
+    local kindBadge = " " .. kindLabel .. " "
+    local kindBg = state.bridgeKind == "rs" and colors.magenta or colors.blue
+    writeAt(c, 2, 2, trim(cfg.subtitle, math.max(1, width - #kindBadge - 3)), colors.lightBlue, colors.gray)
+    writeAt(c, math.max(1, width - #kindBadge + 1), 2, kindBadge, colors.white, kindBg)
+
+    fillLine(c, 3, width, colors.black)
+    local summaryX = 2
+    local function summaryPart(label, value, valueColor)
+        local prefix = label .. " "
+        if summaryX + #prefix + #value - 1 <= width then
+            writeAt(c, summaryX, 3, prefix, colors.gray, colors.black)
+            summaryX = summaryX + #prefix
+            writeAt(c, summaryX, 3, value, valueColor, colors.black)
+            summaryX = summaryX + #value + 3
+        end
+    end
+    summaryPart("ITEMS", formatThousands(state.data.itemTotalCount), amountColor(state.data.itemTotalCount))
+    summaryPart("TYPEN", tostring(state.data.itemTypes), colors.cyan)
+    summaryPart("PATTERNS", formatThousands(state.data.patterns), colors.magenta)
 
     local top    = 4
     local bottom = height - 1
@@ -584,14 +619,25 @@ local function renderStatus(c, width, height)
         if y > bottom then break end
         local line = lines[i]
         if line.kind == "header" then
-            writeAt(c, 1, y, trim("-- " .. line.text .. " --", width), colors.orange, colors.black)
+            fillLine(c, y, width, colors.gray)
+            writeAt(c, 2, y, trim(line.text, math.max(1, width - 2)), line.color or colors.orange, colors.gray)
         elseif line.kind == "bar" then
-            drawBar(c, 1, y, math.min(width, 40), line.percent, line.color or barColorFor(line.percent), colors.gray)
+            local barWidth = math.min(width, math.max(4, math.min(width - 6, 40)))
+            drawBar(c, 1, y, barWidth, line.percent, line.color or barColorFor(line.percent), colors.gray)
             local pctText = (line.percent or 0) .. "%"
-            writeAt(c, math.min(width, 40) + 2, y, pctText, colors.yellow, colors.black)
+            if barWidth + #pctText + 1 <= width then
+                writeAt(c, barWidth + 2, y, pctText, line.color or colors.yellow, colors.black)
+            end
         elseif line.kind == "row" then
-            writeAt(c, 1, y, "> ", colors.cyan, colors.black)
-            writeAt(c, 3, y, trim(line.text, math.max(1, width - 2)), line.color or colors.white, colors.black)
+            fillLine(c, y, width, colors.gray)
+            writeAt(c, 1, y, "> ", colors.yellow, colors.gray)
+            local right = line.right and trim(line.right, math.max(1, width - 4))
+            local rightX = right and math.max(3, width - #right + 1) or nil
+            local maxText = right and math.max(1, rightX - 4) or math.max(1, width - 2)
+            writeAt(c, 3, y, trim(line.text, maxText), line.color or colors.white, colors.gray)
+            if right then
+                writeAt(c, rightX, y, right, line.rightColor or colors.lime, colors.gray)
+            end
             state.rowRects[y] = line.click
         else
             writeAt(c, 1, y, trim(line.text, width), line.color or colors.lightGray, colors.black)
@@ -606,7 +652,8 @@ local function renderStatus(c, width, height)
         if state.scroll < state.maxScroll then hints[#hints + 1] = "v unten" end
     end
     hints[#hints + 1] = "Zeile (>) = Details"
-    writeAt(c, 1, height, trim(table.concat(hints, "  |  "), width), colors.cyan, colors.black)
+    fillLine(c, height, width, colors.gray)
+    writeAt(c, 1, height, trim(table.concat(hints, "  |  "), width), colors.white, colors.gray)
 end
 
 local function renderItemDetail(c, width, height)
@@ -614,24 +661,32 @@ local function renderItemDetail(c, width, height)
     renderHeader(c, width, "< Zurueck")
     if not it then state.view = "status" return end
 
-    writeAt(c, 1, 3, trim("[" .. it.display .. "]", width), colors.yellow, colors.black)
-    writeAt(c, 1, 4, string.rep("-", width), colors.gray, colors.black)
-    writeAt(c, 1, 6, "Registry: ", colors.white, colors.black)
-    writeAt(c, 11, 6, trim(tostring(it.name or "?"), width - 10), colors.lightGray)
-    writeAt(c, 1, 7, "Menge: ", colors.white, colors.black)
-    writeAt(c, 8, 7, formatThousands(it.amount) .. " Stk.", colors.lime)
-    writeAt(c, 1, 8, "Craftbar: ", colors.white, colors.black)
-    writeAt(c, 11, 8, it.craftable and "JA" or "NEIN", it.craftable and colors.lime or colors.red)
+    fillLine(c, 2, width, colors.gray)
+    writeAt(c, 1, 2, " ITEM-DETAIL ", colors.black, colors.lightBlue)
+    fillLine(c, 3, width, colors.black)
+    writeAt(c, 1, 3, trim(" [" .. it.display .. "] ", width), colors.black, colors.yellow)
 
-    writeAt(c, 1, height, trim("< oben antippen fuer zurueck", width), colors.cyan, colors.black)
+    writeAt(c, 1, 5, "REGISTRY", colors.cyan, colors.black)
+    writeAt(c, 11, 5, trim(tostring(it.name or "?"), math.max(1, width - 10)), colors.lightGray, colors.black)
+    writeAt(c, 1, 7, "MENGE", colors.cyan, colors.black)
+    writeAt(c, 11, 7, formatThousands(it.amount) .. " Stk.", amountColor(it.amount), colors.black)
+    writeAt(c, 1, 9, "CRAFTBAR", colors.cyan, colors.black)
+    local craftText = it.craftable and " JA " or " NEIN "
+    writeAt(c, 11, 9, craftText, colors.white, it.craftable and colors.green or colors.red)
+
+    fillLine(c, height, width, colors.gray)
+    writeAt(c, 1, height, trim("< Kopfzeile antippen: zurueck", width), colors.white, colors.gray)
 end
 
 local function renderCells(c, width, height)
     renderHeader(c, width, "< Zurueck  -  PLATTEN")
     local d = state.data
-    writeAt(c, 1, 2, trim(string.format("%d Platten, %d Typen", d.cellCount, #d.cells), width),
-        colors.lightGray, colors.black)
-    writeAt(c, 1, 3, string.rep("-", width), colors.gray, colors.black)
+    fillLine(c, 2, width, colors.gray)
+    writeAt(c, 2, 2, trim(string.format("%d Platten  |  %d Typen", d.cellCount, #d.cells), width - 1),
+        colors.yellow, colors.gray)
+    fillLine(c, 3, width, colors.lightGray)
+    writeAt(c, 1, 3, "PLATTE / TYP", colors.black, colors.lightGray)
+    if width >= 16 then writeAt(c, width - 6, 3, "GROESSE", colors.black, colors.lightGray) end
 
     local top = 4
     local bottom = height - 1
@@ -644,11 +699,15 @@ local function renderCells(c, width, height)
     for i = 1 + state.scroll, #d.cells do
         if y > bottom then break end
         local cell = d.cells[i]
-        local right = string.format("x%d  %s B", cell.count, humanize(cell.totalBytes))
-        local maxLeft = math.max(4, width - #right - 1)
+        local right = trim(string.format("x%d  %s B", cell.count, humanize(cell.totalBytes)),
+            math.max(1, width - 4))
+        local rightX = math.max(3, width - #right + 1)
+        local maxLeft = math.max(1, rightX - 2)
         local left = string.format("%s (%s)", cell.name, cell.cellType)
-        writeAt(c, 1, y, trim(left, maxLeft), colors.white, colors.black)
-        writeAt(c, math.max(1, width - #right), y, right, colors.lightGray, colors.black)
+        local rowBg = ((i - state.scroll) % 2 == 0) and colors.gray or colors.black
+        fillLine(c, y, width, rowBg)
+        writeAt(c, 1, y, trim(left, maxLeft), colors.white, rowBg)
+        writeAt(c, rightX, y, right, colors.lightBlue, rowBg)
         y = y + 1
     end
 
@@ -657,7 +716,8 @@ local function renderCells(c, width, height)
         if state.scroll > 0 then hints[#hints + 1] = "^ oben" end
         if state.scroll < state.maxScroll then hints[#hints + 1] = "v unten" end
     end
-    writeAt(c, 1, height, trim(table.concat(hints, "  |  "), width), colors.cyan, colors.black)
+    fillLine(c, height, width, colors.gray)
+    writeAt(c, 1, height, trim(table.concat(hints, "  |  "), width), colors.white, colors.gray)
 end
 
 local function render()
