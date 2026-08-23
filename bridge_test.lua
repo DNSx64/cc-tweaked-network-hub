@@ -86,10 +86,38 @@ local function listBridges()
 end
 
 -- ---------------------------------------------------------------------------
+--  Ausgabe auf Monitor (Screen) umleiten, falls einer vorhanden ist
+-- ---------------------------------------------------------------------------
+
+-- Sucht einen angeschlossenen Advanced Monitor und leitet die gesamte
+-- Ausgabe dorthin um. Faellt sonst auf das Terminal zurueck.
+local monitor = peripheral.find("monitor")
+local prevTerm
+if monitor then
+    pcall(monitor.setTextScale, 0.5)
+    monitor.setBackgroundColor(colors.black)
+    monitor.setTextColor(colors.white)
+    monitor.clear()
+    monitor.setCursorPos(1, 1)
+    prevTerm = term.redirect(monitor)
+end
+
+-- Am Ende (oder bei Fehler) das Terminal wiederherstellen.
+local function restoreTerm()
+    if prevTerm then
+        term.redirect(prevTerm)
+        prevTerm = nil
+    end
+end
+
+-- ---------------------------------------------------------------------------
 --  Test-Ablauf
 -- ---------------------------------------------------------------------------
 
-print("=== bridge_test v1.0 ===")
+print("=== bridge_test v1.1 ===")
+if monitor then
+    print("(Ausgabe auf Monitor: " .. peripheral.getName(monitor) .. ")")
+end
 print("")
 
 -- 1) Alle Peripherie auflisten.
@@ -106,6 +134,7 @@ if #bridges == 0 then
     print("!! KEINE ME/RS Bridge gefunden.")
     print("   -> Bridge direkt ansetzen ODER per Wired Modem verbinden")
     print("      und am Modem den roten Ring aktivieren (Rechtsklick).")
+    restoreTerm()
     return
 end
 
@@ -164,3 +193,7 @@ for idx, b in ipairs(bridges) do
 end
 
 print("=== fertig ===")
+restoreTerm()
+if monitor then
+    print("[bridge_test] Ausgabe steht auf dem Monitor.")
+end
