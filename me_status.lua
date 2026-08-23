@@ -19,7 +19,7 @@
 --  Bytes) und getItems (Top-Verbraucher) bestmoeglich hergeleitet.
 -- ============================================================================
 
-local SCRIPT_VERSION = "1.3"
+local SCRIPT_VERSION = "2.0"
 
 local cfg = {
     title        = "ME SYSTEM",
@@ -107,6 +107,72 @@ local function cleanItemLabel(value)
     return label ~= "" and label or "?"
 end
 
+local CATEGORY_DEFS = {
+    { key = "metals", label = "ERZE/METALLE", color = colors.orange },
+    { key = "blocks", label = "BLOECKE", color = colors.lightBlue },
+    { key = "tech", label = "TECHNIK", color = colors.magenta },
+    { key = "food", label = "NAHRUNG", color = colors.lime },
+    { key = "tools", label = "WERKZEUGE", color = colors.yellow },
+    { key = "drops", label = "DROPS", color = colors.red },
+    { key = "misc", label = "SONSTIGES", color = colors.gray },
+}
+
+local function itemCategory(item)
+    local text = (tostring(item.name or "") .. " " .. tostring(item.display or "")):lower()
+    if text:find("ingot", 1, true) or text:find("ore", 1, true)
+        or text:find("dust", 1, true) or text:find("nugget", 1, true)
+        or text:find("gem", 1, true) or text:find("raw_", 1, true)
+        or text:find("diamond", 1, true) or text:find("emerald", 1, true)
+        or text:find("crystal", 1, true) then return "metals" end
+    if text:find("_block", 1, true) or text:find("stone", 1, true)
+        or text:find("cobble", 1, true) or text:find("planks", 1, true)
+        or text:find("_log", 1, true) or text:find("glass", 1, true)
+        or text:find("concrete", 1, true) or text:find("brick", 1, true)
+        or text:find("sand", 1, true) or text:find("dirt", 1, true) then return "blocks" end
+    if text:find("circuit", 1, true) or text:find("processor", 1, true)
+        or text:find("component", 1, true) or text:find("machine", 1, true)
+        or text:find("cable", 1, true) or text:find("wire", 1, true)
+        or text:find("gear", 1, true) or text:find("plate", 1, true) then return "tech" end
+    if text:find("bread", 1, true) or text:find("apple", 1, true)
+        or text:find("beef", 1, true) or text:find("pork", 1, true)
+        or text:find("chicken", 1, true) or text:find("carrot", 1, true)
+        or text:find("potato", 1, true) or text:find("berry", 1, true)
+        or text:find("cookie", 1, true) or text:find("stew", 1, true)
+        or text:find("food", 1, true) then return "food" end
+    if text:find("sword", 1, true) or text:find("pickaxe", 1, true)
+        or text:find("shovel", 1, true) or text:find("helmet", 1, true)
+        or text:find("chestplate", 1, true) or text:find("leggings", 1, true)
+        or text:find("boots", 1, true) or text:find("shield", 1, true)
+        or text:find("bow", 1, true) then return "tools" end
+    if text:find("bone", 1, true) or text:find("rotten", 1, true)
+        or text:find("gunpowder", 1, true) or text:find("ender_pearl", 1, true)
+        or text:find("blaze", 1, true) or text:find("slime", 1, true)
+        or text:find("feather", 1, true) or text:find("string", 1, true) then return "drops" end
+    return "misc"
+end
+
+local function summarizeCategories(items)
+    local totals, total = {}, 0
+    for _, item in ipairs(items) do
+        local amount = num(item.amount)
+        local key = itemCategory(item)
+        totals[key] = (totals[key] or 0) + amount
+        total = total + amount
+    end
+    local result = {}
+    for _, def in ipairs(CATEGORY_DEFS) do
+        local amount = totals[def.key] or 0
+        if amount > 0 then
+            result[#result + 1] = {
+                key = def.key, label = def.label, color = def.color,
+                amount = amount, share = total > 0 and amount / total or 0,
+            }
+        end
+    end
+    table.sort(result, function(a, b) return a.amount > b.amount end)
+    return result
+end
+
 local function normalizeTypeName(value)
     return (tostring(value or ""):lower():gsub("[^a-z0-9]", ""))
 end
@@ -126,6 +192,7 @@ local state = {
     maxScroll = 0,
     lastVisible = 10,
     rowRects  = {},        -- [y] = { kind=..., payload=... }
+    navRects  = {},
     selectedItem = nil,
     lastFast  = 0,
     lastSlow  = 0,
@@ -139,6 +206,8 @@ local state = {
         cells = {},        -- gruppiert: { {name, count, totalBytes, cellType}, ... }
         cellCount = 0, cellsSupported = true,
         consumers = {},     -- { {name, display, amount, craftable}, ... }
+        categories = {},
+        history = {},
         itemTypes = 0, itemTotalCount = 0,
         online = false,
     },
@@ -243,6 +312,123 @@ local function amountColor(amount)
     if amount >= 10000 then return colors.cyan end
     if amount >= 1000 then return colors.lime end
     return colors.yellow
+end
+
+local BIG_GLYPHS = {
+    ["0"] = { "###", "# #", "# #", "# #", "###" },
+    ["1"] = { " # ", "## ", " # ", " # ", "###" },
+    ["2"] = { "###", "  #", "###", "#  ", "###" },
+    ["3"] = { "###", "  #", " ##", "  #", "###" },
+    ["4"] = { "# #", "# #", "###", "  #", "  #" },
+    ["5"] = { "###", "#  ", "###", "  #", "###" },
+    ["6"] = { "###", "#  ", "###", "# #", "###" },
+    ["7"] = { "###", "  #", "  #", " # ", " # " },
+    ["8"] = { "###", "# #", "###", "# #", "###" },
+    ["9"] = { "###", "# #", "###", "  #", "###" },
+    ["%"] = { "# #", "  #", " # ", "#  ", "# #" },
+}
+
+local function clockText()
+    local ok, value = pcall(function()
+        return textutils.formatTime(os.time("local"), true)
+    end)
+    return ok and tostring(value) or "LIVE"
+end
+
+local function drawBigText(c, x, y, text, color, scaleX)
+    scaleX = scaleX or 1
+    local cursorX = x
+    for char in tostring(text):gmatch(".") do
+        local glyph = BIG_GLYPHS[char]
+        if glyph then
+            for row = 1, 5 do
+                for column = 1, 3 do
+                    if glyph[row]:sub(column, column) == "#" then
+                        writeAt(c, cursorX + (column - 1) * scaleX, y + row - 1,
+                            string.rep("#", scaleX), color, colors.black)
+                    end
+                end
+            end
+            cursorX = cursorX + 3 * scaleX + 1
+        end
+    end
+    return cursorX - x
+end
+
+local function drawThinBar(c, x, y, width, ratio, filled, empty)
+    if width <= 0 then return end
+    ratio = math.max(0, math.min(1, ratio or 0))
+    local fill = math.floor(width * ratio + 0.5)
+    writeAt(c, x, y, string.rep(" ", width), colors.white, empty or colors.gray)
+    if fill > 0 then
+        writeAt(c, x, y, string.rep(" ", fill), colors.white, filled or colors.lime)
+    end
+    c.setBackgroundColor(colors.black)
+end
+
+local function drawCompositionBar(c, x, y, width, categories)
+    if width <= 0 then return end
+    writeAt(c, x, y, string.rep(" ", width), colors.white, colors.gray)
+    local cursor, remaining = x, width
+    for index, category in ipairs(categories) do
+        if remaining <= 0 then break end
+        local segment
+        if index == #categories then
+            segment = remaining
+        else
+            segment = math.min(remaining, math.max(1, math.floor(width * category.share + 0.5)))
+        end
+        writeAt(c, cursor, y, string.rep(" ", segment), colors.white, category.color)
+        cursor = cursor + segment
+        remaining = remaining - segment
+    end
+    c.setBackgroundColor(colors.black)
+end
+
+local function drawCategoryLegend(c, x, y, width, categories, maxRows)
+    local cursorX, cursorY = x, y
+    for _, category in ipairs(categories) do
+        local label = string.format("%s %d%%", category.label, math.floor(category.share * 100 + 0.5))
+        local needed = #label + 3
+        if cursorX + needed - 1 > x + width - 1 then
+            cursorX = x
+            cursorY = cursorY + 1
+        end
+        if cursorY >= y + maxRows then break end
+        writeAt(c, cursorX, cursorY, " ", colors.white, category.color)
+        writeAt(c, cursorX + 2, cursorY, label, colors.lightGray, colors.black)
+        cursorX = cursorX + needed
+    end
+end
+
+local function drawHistory(c, x, y, width, height, history)
+    if width <= 0 or height <= 0 then return end
+    for row = 0, height - 1 do
+        writeAt(c, x, y + row, string.rep(" ", width), colors.white, colors.black)
+    end
+    writeAt(c, x, y + height - 1, string.rep("-", width), colors.gray, colors.black)
+    if #history == 0 then return end
+
+    local first = math.max(1, #history - width + 1)
+    local minValue, maxValue = history[first], history[first]
+    for index = first, #history do
+        minValue = math.min(minValue, history[index])
+        maxValue = math.max(maxValue, history[index])
+    end
+    local range = math.max(1, maxValue - minValue)
+    local sampleCount = #history - first + 1
+    for column = 0, width - 1 do
+        local source = first + math.floor(column * math.max(0, sampleCount - 1) / math.max(1, width - 1))
+        local value = history[source] or history[#history]
+        local ratio = (value - minValue) / range
+        local filled = math.max(1, math.floor(ratio * math.max(1, height - 1) + 0.5))
+        for offset = 0, filled - 1 do
+            local py = y + height - 1 - offset
+            writeAt(c, x + column, py, " ", colors.white,
+                offset == filled - 1 and colors.lime or colors.green)
+        end
+    end
+    c.setBackgroundColor(colors.black)
 end
 
 local function drawBar(c, x, y, width, percent, filled, empty)
@@ -406,6 +592,11 @@ local function collectSlow()
     table.sort(flat, function(a, c) return a.amount > c.amount end)
     d.itemTotalCount = totalCount
     d.itemTypes = typeCount
+    d.categories = summarizeCategories(flat)
+
+    local history = d.history
+    history[#history + 1] = totalCount
+    while #history > 120 do table.remove(history, 1) end
 
     local consumers = {}
     for i = 1, math.min(cfg.topConsumers, #flat) do
@@ -578,7 +769,7 @@ local function renderHeader(c, width, titleText)
     c.setBackgroundColor(colors.black)
 end
 
-local function renderStatus(c, width, height)
+local function renderStatusCompact(c, width, height)
     renderHeader(c, width, cfg.title)
     fillLine(c, 2, width, colors.gray)
     local kindLabel = state.bridgeKind == "rs" and "RS" or (state.bridgeKind == "me" and "ME" or "?")
@@ -656,6 +847,173 @@ local function renderStatus(c, width, height)
     writeAt(c, 1, height, trim(table.concat(hints, "  |  "), width), colors.white, colors.gray)
 end
 
+local function renderStatusDashboard(c, width, height)
+    local d = state.data
+    state.rowRects = {}
+    state.navRects = {}
+    state.scroll = 0
+    state.maxScroll = 0
+
+    -- Schmale Kopfzeile wie ein Operations-Terminal.
+    fillLine(c, 1, width, colors.black)
+    writeAt(c, 2, 1, "ME STORAGE", colors.white, colors.black)
+    local mode = state.bridgeKind == "rs" and "RS GRID" or "AE2 GRID"
+    writeAt(c, 13, 1, "| " .. mode, colors.gray, colors.black)
+    local typeText = string.format("%d ITEM TYPES", d.itemTypes)
+    if 24 + #typeText < width - 8 then
+        writeAt(c, 24, 1, typeText, colors.gray, colors.black)
+    end
+    local time = clockText()
+    writeAt(c, math.max(1, width - #time + 1), 1, time, colors.lightGray, colors.black)
+
+    -- Grosse Speicher-KPI links, Detailwerte rechts.
+    local storagePercent = d.itemTotal > 0 and math.floor((d.itemUsed / d.itemTotal) * 100 + 0.5) or 0
+    if d.itemUsed > 0 and storagePercent == 0 then storagePercent = 1 end
+    storagePercent = math.max(0, math.min(100, storagePercent))
+    local healthText, healthColor = "HEALTHY", colors.lime
+    if not d.online then healthText, healthColor = "OFFLINE", colors.red
+    elseif storagePercent >= 95 then healthText, healthColor = "FULL", colors.red
+    elseif storagePercent >= 80 then healthText, healthColor = "HIGH", colors.orange
+    elseif storagePercent >= 60 then healthText, healthColor = "MODERATE", colors.yellow end
+
+    local scaleX = width >= 72 and 2 or 1
+    local bigWidth = drawBigText(c, 2, 2, tostring(storagePercent) .. "%", healthColor, scaleX)
+    writeAt(c, 2, 7, healthText, healthColor, colors.black)
+
+    local statsX = math.max(18, bigWidth + 5)
+    local statsWidth = math.max(8, width - statsX)
+    local storageLine = string.format("%s / %s %s USED",
+        humanize(d.itemUsed), humanize(d.itemTotal), d.itemUnit)
+    writeAt(c, statsX, 2, trim(storageLine, statsWidth), colors.white, colors.black)
+    drawThinBar(c, statsX, 3, statsWidth, storagePercent / 100, healthColor, colors.gray)
+    writeAt(c, statsX, 4,
+        trim(string.format("%s ITEMS  |  %d TYPES", formatThousands(d.itemTotalCount), d.itemTypes), statsWidth),
+        colors.lightGray, colors.black)
+    writeAt(c, statsX, 5,
+        trim(string.format("ENERGY %s/%s %s  |  %s/t", humanize(d.energyStored), humanize(d.energyMax),
+            d.energyUnit, humanize(d.energyUsage)), statsWidth), colors.lightGray, colors.black)
+    writeAt(c, statsX, 6,
+        trim(string.format("PATTERNS %s  |  CELLS %d", formatThousands(d.patterns), d.cellCount), statsWidth),
+        colors.lightGray, colors.black)
+    local cpuText = d.cpuSupported and string.format("CRAFTING %d/%d BUSY", d.cpuBusy, #d.cpus)
+        or "CRAFTING DATA N/A"
+    writeAt(c, statsX, 7, trim(cpuText, statsWidth), d.cpuBusy > 0 and colors.yellow or colors.gray, colors.black)
+
+    -- Zusammensetzung.
+    fillLine(c, 8, width, colors.black)
+    writeAt(c, 2, 8, "COMPOSITION", colors.gray, colors.black)
+    writeAt(c, math.max(2, width - 17), 8, "SHARE OF ITEMS", colors.gray, colors.black)
+    drawCompositionBar(c, 2, 9, math.max(1, width - 3), d.categories)
+    drawCategoryLegend(c, 2, 10, math.max(1, width - 3), d.categories, 2)
+
+    -- Rollender Verlauf. Der untere Bereich behaelt immer genug Platz fuer Tabellen.
+    local trendTitleY = 12
+    local lowerTitleY = math.max(17, height - 8)
+    local chartY = trendTitleY + 1
+    local chartHeight = math.max(2, lowerTitleY - chartY)
+    writeAt(c, 2, trendTitleY, "ITEM TREND", colors.gray, colors.black)
+    local trendRange = ""
+    if #d.history > 0 then
+        trendRange = string.format("%s -> %s", humanize(d.history[1]), humanize(d.history[#d.history]))
+        writeAt(c, math.max(2, width - #trendRange + 1), trendTitleY,
+            trim(trendRange, width - 1), colors.gray, colors.black)
+    end
+    drawHistory(c, 2, chartY, math.max(1, width - 3), chartHeight, d.history)
+
+    -- Untere Zweispaltenansicht.
+    local splitX = math.floor(width * 0.60)
+    writeAt(c, 2, lowerTitleY, "TOP CONSUMERS", colors.gray, colors.black)
+    writeAt(c, splitX + 1, lowerTitleY, "SYSTEM LOAD", colors.gray, colors.black)
+    local listStart, listEnd = lowerTitleY + 1, height - 2
+    local leftEnd = splitX - 2
+    local leftWidth = math.max(12, leftEnd - 1)
+    local maxAmount = d.consumers[1] and d.consumers[1].amount or 1
+
+    for row = 0, listEnd - listStart do
+        local item = d.consumers[row + 1]
+        if not item then break end
+        local y = listStart + row
+        local amount = humanize(item.amount)
+        local barWidth = math.max(4, math.min(10, math.floor(leftWidth * 0.22)))
+        local barX = leftEnd - #amount - barWidth
+        local nameWidth = math.max(4, barX - 5)
+        local swatchColor = colors.gray
+        local key = itemCategory(item)
+        for _, def in ipairs(CATEGORY_DEFS) do
+            if def.key == key then swatchColor = def.color break end
+        end
+        writeAt(c, 2, y, " ", colors.white, swatchColor)
+        writeAt(c, 4, y, trim(item.display, nameWidth), colors.lightGray, colors.black)
+        drawThinBar(c, barX, y, barWidth, item.amount / math.max(1, maxAmount), swatchColor, colors.gray)
+        writeAt(c, leftEnd - #amount + 1, y, amount, amountColor(item.amount), colors.black)
+        state.rowRects[y] = state.rowRects[y] or {}
+        state.rowRects[y][#state.rowRects[y] + 1] = {
+            x1 = 1, x2 = splitX, kind = "item", item = item,
+        }
+    end
+
+    local rightX, rightEnd = splitX + 1, width - 1
+    local rightWidth = math.max(8, rightEnd - rightX + 1)
+    local metrics = {
+        { "CRAFTING", d.cpuSupported and string.format("%d/%d", d.cpuBusy, #d.cpus) or "N/A",
+            d.cpuBusy > 0 and colors.yellow or colors.lime },
+        { "PATTERNS", formatThousands(d.patterns), colors.magenta },
+        { "CELLS", tostring(d.cellCount), colors.lightBlue, "cells" },
+        { "ENERGY/T", humanize(d.energyUsage), colors.orange },
+        { "BRIDGE", state.bridgeKind == "rs" and "RS" or "ME", colors.cyan },
+        { "STATUS", healthText, healthColor },
+    }
+    for index = 1, math.min(#metrics, listEnd - listStart + 1) do
+        local metric = metrics[index]
+        local y = listStart + index - 1
+        writeAt(c, rightX, y, trim(metric[1], math.max(1, rightWidth - #metric[2] - 2)), colors.gray, colors.black)
+        writeAt(c, math.max(rightX, rightEnd - #metric[2] + 1), y, metric[2], metric[3], colors.black)
+        if metric[4] then
+            state.rowRects[y] = state.rowRects[y] or {}
+            state.rowRects[y][#state.rowRects[y] + 1] = {
+                x1 = rightX, x2 = width, kind = metric[4],
+            }
+        end
+    end
+
+    -- Eine kompakte Alarmzeile statt dekorativer Karten.
+    local alertY = height - 1
+    local alertText, alertColor = "No active alerts", colors.lime
+    if not d.online then alertText, alertColor = "Bridge offline", colors.red
+    elseif storagePercent >= 95 then alertText, alertColor = "Item storage is full", colors.red
+    elseif storagePercent >= 80 then alertText, alertColor = "Item storage above 80%", colors.orange
+    elseif d.cpuBusy > 0 then alertText, alertColor = string.format("%d crafting CPU(s) active", d.cpuBusy), colors.yellow end
+    fillLine(c, alertY, width, colors.black)
+    writeAt(c, 1, alertY, " ALERTS ", colors.black, colors.orange)
+    writeAt(c, 10, alertY, trim(alertText, math.max(1, width - 9)), alertColor, colors.black)
+
+    -- Funktionale Tab-Leiste.
+    fillLine(c, height, width, colors.gray)
+    local function tab(x, label, action, active)
+        if x > width then return x end
+        local text = " " .. label .. " "
+        text = trim(text, math.max(1, width - x + 1))
+        writeAt(c, x, height, text, active and colors.black or colors.white,
+            active and colors.lightGray or colors.gray)
+        state.navRects[#state.navRects + 1] = { x1 = x, x2 = x + #text - 1, action = action }
+        return x + #text + 1
+    end
+    local footerX = tab(1, "OVERVIEW", "status", true)
+    footerX = tab(footerX, "CELLS", "cells", false)
+    local hint = "TOUCH ITEM = DETAILS"
+    if footerX + #hint < width then
+        writeAt(c, width - #hint + 1, height, hint, colors.lightGray, colors.gray)
+    end
+end
+
+local function renderStatus(c, width, height)
+    if width >= 48 and height >= 23 then
+        renderStatusDashboard(c, width, height)
+    else
+        renderStatusCompact(c, width, height)
+    end
+end
+
 local function renderItemDetail(c, width, height)
     local it = state.selectedItem
     renderHeader(c, width, "< Zurueck")
@@ -731,6 +1089,7 @@ local function render()
     c.setVisible(false)
     c.setBackgroundColor(colors.black)
     c.clear()
+    state.navRects = {}
 
     local width, height = c.getSize()
     width  = width or 51
@@ -762,6 +1121,7 @@ end
 -- ---------------------------------------------------------------------------
 
 local function handleTouch(x, y)
+    if not state.canvas then return end
     if state.view == "item" then
         if y == 1 then state.view = "status"; state.scroll = 0; render() end
         return
@@ -776,8 +1136,36 @@ local function handleTouch(x, y)
         return
     end
 
+    local _, height = state.canvas.getSize()
+    if y == height then
+        for _, nav in ipairs(state.navRects) do
+            if x >= nav.x1 and x <= nav.x2 then
+                if nav.action == "cells" then
+                    state.view = "cells"
+                    state.scroll = 0
+                    state.selectedItem = nil
+                else
+                    state.view = "status"
+                end
+                render()
+                return
+            end
+        end
+    end
+
     -- Statusansicht: anklickbare Zeile?
-    local click = state.rowRects[y]
+    local rowEntry = state.rowRects[y]
+    local click
+    if rowEntry and rowEntry.kind then
+        click = rowEntry
+    elseif type(rowEntry) == "table" then
+        for _, candidate in ipairs(rowEntry) do
+            if x >= (candidate.x1 or 1) and x <= (candidate.x2 or math.huge) then
+                click = candidate
+                break
+            end
+        end
+    end
     if click then
         if click.kind == "item" then
             state.selectedItem = click.item
@@ -785,6 +1173,7 @@ local function handleTouch(x, y)
         elseif click.kind == "cells" then
             state.view = "cells"
             state.scroll = 0
+            state.selectedItem = nil
         end
         render()
         return

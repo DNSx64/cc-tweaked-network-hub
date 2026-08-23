@@ -20,7 +20,7 @@
 --  WICHTIG (CC:Tweaked): Peripherals UND window-Objekte OHNE self aufrufen.
 -- ============================================================================
 
-local SCRIPT_VERSION = "1.2"
+local SCRIPT_VERSION = "2.0"
 
 local cfg = {
     title        = "ME DASHBOARD / ITEMS",
@@ -84,6 +84,55 @@ local function cleanItemLabel(value)
         label = label:sub(2, -2):gsub("^%s+", ""):gsub("%s+$", "")
     end
     return label ~= "" and label or "?"
+end
+
+local ITEM_GROUPS = {
+    { key = "metals", label = "ERZE", color = colors.orange,
+        words = { "ingot", "ore", "dust", "nugget", "gem", "raw_", "diamond", "emerald", "crystal" } },
+    { key = "blocks", label = "BLOECKE", color = colors.lightBlue,
+        words = { "_block", "stone", "cobble", "planks", "_log", "glass", "concrete", "brick", "sand", "dirt" } },
+    { key = "tech", label = "TECH", color = colors.magenta,
+        words = { "circuit", "processor", "component", "machine", "cable", "wire", "gear", "plate" } },
+    { key = "food", label = "FOOD", color = colors.lime,
+        words = { "bread", "apple", "beef", "pork", "chicken", "carrot", "potato", "berry", "cookie", "stew" } },
+    { key = "tools", label = "TOOLS", color = colors.yellow,
+        words = { "sword", "pickaxe", "shovel", "helmet", "chestplate", "leggings", "boots", "shield", "bow" } },
+    { key = "drops", label = "DROPS", color = colors.red,
+        words = { "bone", "rotten", "gunpowder", "ender_pearl", "blaze", "slime", "feather", "string" } },
+    { key = "misc", label = "MISC", color = colors.gray, words = {} },
+}
+
+local function groupForItem(item)
+    if item.group then return item.group end
+    local text = (tostring(item.name or "") .. " " .. tostring(item.display or "")):lower()
+    for index = 1, #ITEM_GROUPS - 1 do
+        local group = ITEM_GROUPS[index]
+        for _, word in ipairs(group.words) do
+            if text:find(word, 1, true) then return group end
+        end
+    end
+    return ITEM_GROUPS[#ITEM_GROUPS]
+end
+
+local function summarizeGroups(items)
+    local totals, total = {}, 0
+    for _, item in ipairs(items) do
+        local group = groupForItem(item)
+        totals[group.key] = (totals[group.key] or 0) + num(item.amount)
+        total = total + num(item.amount)
+    end
+    local result = {}
+    for _, group in ipairs(ITEM_GROUPS) do
+        local amount = totals[group.key] or 0
+        if amount > 0 then
+            result[#result + 1] = {
+                label = group.label, color = group.color, amount = amount,
+                share = total > 0 and amount / total or 0,
+            }
+        end
+    end
+    table.sort(result, function(a, b) return a.amount > b.amount end)
+    return result
 end
 
 local function normalizeTypeName(value)
@@ -221,6 +270,82 @@ local function rankColor(rank)
     return colors.cyan
 end
 
+local BIG_GLYPHS = {
+    ["0"] = { "###", "# #", "# #", "# #", "###" },
+    ["1"] = { " # ", "## ", " # ", " # ", "###" },
+    ["2"] = { "###", "  #", "###", "#  ", "###" },
+    ["3"] = { "###", "  #", " ##", "  #", "###" },
+    ["4"] = { "# #", "# #", "###", "  #", "  #" },
+    ["5"] = { "###", "#  ", "###", "  #", "###" },
+    ["6"] = { "###", "#  ", "###", "# #", "###" },
+    ["7"] = { "###", "  #", "  #", " # ", " # " },
+    ["8"] = { "###", "# #", "###", "# #", "###" },
+    ["9"] = { "###", "# #", "###", "  #", "###" },
+}
+
+local function clockText()
+    local ok, value = pcall(function()
+        return textutils.formatTime(os.time("local"), true)
+    end)
+    return ok and tostring(value) or "LIVE"
+end
+
+local function drawBigText(c, x, y, text, color, scaleX)
+    scaleX = scaleX or 1
+    local cursorX = x
+    for char in tostring(text):gmatch(".") do
+        local glyph = BIG_GLYPHS[char]
+        if glyph then
+            for row = 1, 5 do
+                for column = 1, 3 do
+                    if glyph[row]:sub(column, column) == "#" then
+                        writeAt(c, cursorX + (column - 1) * scaleX, y + row - 1,
+                            string.rep("#", scaleX), color, colors.black)
+                    end
+                end
+            end
+            cursorX = cursorX + 3 * scaleX + 1
+        end
+    end
+    return cursorX - x
+end
+
+local function drawThinBar(c, x, y, width, ratio, filled, empty)
+    if width <= 0 then return end
+    ratio = math.max(0, math.min(1, ratio or 0))
+    local fill = math.floor(width * ratio + 0.5)
+    writeAt(c, x, y, string.rep(" ", width), colors.white, empty or colors.gray)
+    if fill > 0 then writeAt(c, x, y, string.rep(" ", fill), colors.white, filled or colors.lime) end
+    c.setBackgroundColor(colors.black)
+end
+
+local function drawComposition(c, x, y, width, groups)
+    writeAt(c, x, y, string.rep(" ", math.max(1, width)), colors.white, colors.gray)
+    local cursor, remaining = x, width
+    for index, group in ipairs(groups) do
+        if remaining <= 0 then break end
+        local segment = index == #groups and remaining
+            or math.min(remaining, math.max(1, math.floor(width * group.share + 0.5)))
+        writeAt(c, cursor, y, string.rep(" ", segment), colors.white, group.color)
+        cursor = cursor + segment
+        remaining = remaining - segment
+    end
+    c.setBackgroundColor(colors.black)
+end
+
+local function drawGroupLegend(c, x, y, width, groups, maxRows)
+    local cursorX, cursorY = x, y
+    for _, group in ipairs(groups) do
+        local label = string.format("%s %d%%", group.label, math.floor(group.share * 100 + 0.5))
+        local needed = #label + 3
+        if cursorX + needed - 1 > x + width - 1 then cursorX, cursorY = x, cursorY + 1 end
+        if cursorY >= y + maxRows then break end
+        writeAt(c, cursorX, cursorY, " ", colors.white, group.color)
+        writeAt(c, cursorX + 2, cursorY, label, colors.lightGray, colors.black)
+        cursorX = cursorX + needed
+    end
+end
+
 local function createCanvas()
     local target = state.monitor or term.current()
     if state.monitor then
@@ -263,12 +388,14 @@ local function refreshItems()
                 local amount = num(item.amount or item.count)
                 if amount > 0 then
                     total = total + amount
-                    flat[#flat + 1] = {
+                    local entry = {
                         name = item.name,
                         display = cleanItemLabel(item.displayName or prettify(item.name)),
                         amount = amount,
                         craftable = item.isCraftable and true or false,
                     }
+                    entry.group = groupForItem(entry)
+                    flat[#flat + 1] = entry
                 end
             end
         end
@@ -298,7 +425,7 @@ end
 --  Rendering
 -- ---------------------------------------------------------------------------
 
-local function render()
+local function renderCompact()
     if not state.canvas then createCanvas() end
     local c = state.canvas
     if not c then return end
@@ -327,7 +454,7 @@ local function render()
         writeAt(c, 2, 2, subtitle, colors.lightBlue, colors.gray)
         local kindLabel = state.bridgeKind == "rs" and "RS" or (state.bridgeKind == "me" and "ME" or "?")
         local info = string.format("%s  %d Typen  %s Stk.", kindLabel, #state.view, formatThousands(state.totalCount))
-        local infoX = width - #info
+        local infoX = math.max(1, width - #info + 1)
         if infoX > #subtitle + 3 then
             writeAt(c, infoX, 2, info, colors.yellow, colors.gray)
         end
@@ -419,6 +546,141 @@ local function render()
     end
 
     c.setVisible(true)
+end
+
+local function renderDashboard()
+    if not state.canvas then createCanvas() end
+    local c = state.canvas
+    if not c then return end
+
+    c.setVisible(false)
+    c.setBackgroundColor(colors.black)
+    c.clear()
+
+    local width, height = c.getSize()
+    width = width or 51
+    height = height or 19
+
+    local ok, err = pcall(function()
+        applyFilter()
+        state.buttons = {}
+
+        local visibleTotal = 0
+        for _, item in ipairs(state.view) do visibleTotal = visibleTotal + num(item.amount) end
+        local groups = summarizeGroups(state.view)
+
+        -- Schmale Kopfzeile mit Pfad, Online-Status und Uhrzeit.
+        fillLine(c, 1, width, colors.black)
+        writeAt(c, 2, 1, "ME STORAGE", colors.white, colors.black)
+        writeAt(c, 13, 1, "| ITEM EXPLORER", colors.gray, colors.black)
+        local time = clockText()
+        writeAt(c, math.max(1, width - #time + 1), 1, time, colors.lightGray, colors.black)
+        local onlineText = state.online and "ONLINE" or "OFFLINE"
+        local onlineX = width - #time - #onlineText - 2
+        if onlineX > 30 then
+            writeAt(c, onlineX, 1, onlineText, state.online and colors.lime or colors.red, colors.black)
+        end
+
+        -- Grosse Typen-KPI links, Filterdaten rechts.
+        local scaleX = width >= 72 and 2 or 1
+        local bigWidth = drawBigText(c, 2, 2, tostring(#state.view), colors.cyan, scaleX)
+        writeAt(c, 2, 7, "ITEM TYPES", colors.cyan, colors.black)
+        local statsX = math.max(18, bigWidth + 5)
+        local statsWidth = math.max(8, width - statsX)
+        writeAt(c, statsX, 2, trim(formatThousands(visibleTotal) .. " ITEMS VISIBLE", statsWidth),
+            colors.white, colors.black)
+        local visibleRatio = #state.allItems > 0 and #state.view / #state.allItems or 0
+        drawThinBar(c, statsX, 3, statsWidth, visibleRatio, colors.cyan, colors.gray)
+        writeAt(c, statsX, 4,
+            trim(string.format("%d / %d TYPES", #state.view, #state.allItems), statsWidth), colors.lightGray, colors.black)
+        local filterText = state.query ~= "" and ("FILTER  " .. state.query) or "FILTER  ALL ITEMS"
+        writeAt(c, statsX, 5, trim(filterText, statsWidth), state.query ~= "" and colors.yellow or colors.gray, colors.black)
+        local bridgeText = state.bridgeKind == "rs" and "RS GRID" or "AE2 GRID"
+        writeAt(c, statsX, 6, trim("SOURCE  " .. bridgeText, statsWidth), colors.lightGray, colors.black)
+        local autoText = state.auto and string.format("AUTO PAGE  %ds", state.autoLeft) or "AUTO PAGE  PAUSED"
+        writeAt(c, statsX, 7, trim(autoText, statsWidth), state.auto and colors.lime or colors.orange, colors.black)
+
+        -- Zusammensetzung des aktuell sichtbaren Filters.
+        writeAt(c, 2, 8, "COMPOSITION", colors.gray, colors.black)
+        writeAt(c, math.max(2, width - 17), 8, "SHARE OF ITEMS", colors.gray, colors.black)
+        drawComposition(c, 2, 9, math.max(1, width - 3), groups)
+        drawGroupLegend(c, 2, 10, math.max(1, width - 3), groups, 2)
+
+        -- Dichte Explorer-Tabelle.
+        local headerY, top, bottom = 12, 13, height - 1
+        fillLine(c, headerY, width, colors.gray)
+        writeAt(c, 1, headerY, " #  ITEM", colors.white, colors.gray)
+        if width >= 44 then writeAt(c, width - 5, headerY, "COUNT", colors.white, colors.gray) end
+        if width >= 62 then writeAt(c, width - 20, headerY, "SHARE", colors.white, colors.gray) end
+
+        state.perPage = math.max(1, bottom - top + 1)
+        state.pages = math.max(1, math.ceil(#state.view / state.perPage))
+        state.page = math.max(1, math.min(state.page, state.pages))
+        local startIndex = (state.page - 1) * state.perPage + 1
+        local maxAmount = state.view[1] and state.view[1].amount or 1
+        local y = top
+        for index = startIndex, math.min(#state.view, startIndex + state.perPage - 1) do
+            local item = state.view[index]
+            local group = groupForItem(item)
+            local amount = trim(formatThousands(item.amount), 10)
+            local share = visibleTotal > 0 and item.amount / visibleTotal or 0
+            local shareText = string.format("%d%%", math.floor(share * 100 + 0.5))
+            local barWidth = width >= 70 and 10 or 6
+            local amountX = width - #amount + 1
+            local shareX = amountX - #shareText - 2
+            local barX = shareX - barWidth - 1
+            local nameWidth = math.max(4, barX - 7)
+
+            writeAt(c, 1, y, string.format("%2d", index), rankColor(index), colors.black)
+            writeAt(c, 4, y, " ", colors.white, group.color)
+            writeAt(c, 6, y, trim(item.display, nameWidth), item.craftable and colors.lightBlue or colors.lightGray, colors.black)
+            drawThinBar(c, barX, y, barWidth, item.amount / math.max(1, maxAmount), group.color, colors.gray)
+            writeAt(c, shareX, y, shareText, colors.gray, colors.black)
+            writeAt(c, amountX, y, amount, amountColor(item.amount), colors.black)
+            y = y + 1
+        end
+        if #state.view == 0 then
+            local message = state.query ~= "" and "NO ITEMS MATCH THIS FILTER" or "NO ITEMS IN STORAGE"
+            writeAt(c, math.max(1, math.floor((width - #message) / 2)), top + 1,
+                trim(message, width), colors.orange, colors.black)
+        end
+
+        -- Funktionale Tab-/Steuerleiste im Stil der Referenz.
+        fillLine(c, height, width, colors.gray)
+        local pageText = string.format(" ITEMS  %d/%d ", state.page, state.pages)
+        writeAt(c, 1, height, pageText, colors.black, colors.lightGray)
+        local bSearch = " SEARCH "
+        local bAuto = state.auto and string.format(" AUTO %d ", state.autoLeft) or " PAUSED "
+        local bNext, bPrev = " > ", " < "
+        local xSearch = width - #bSearch + 1
+        local xNext = xSearch - #bNext - 1
+        local xAuto = xNext - #bAuto - 1
+        local xPrev = xAuto - #bPrev - 1
+        local function button(x, label, action, fg, bg)
+            if x < #pageText + 2 then return end
+            writeAt(c, x, height, label, fg, bg)
+            state.buttons[#state.buttons + 1] = { x1 = x, x2 = x + #label - 1, action = action }
+        end
+        button(xPrev, bPrev, "prev", colors.white, colors.gray)
+        button(xAuto, bAuto, "auto", state.auto and colors.lime or colors.orange, colors.gray)
+        button(xNext, bNext, "next", colors.white, colors.gray)
+        button(xSearch, bSearch, "search", colors.black, colors.yellow)
+    end)
+
+    if not ok then
+        c.setBackgroundColor(colors.black)
+        c.setTextColor(colors.red)
+        c.setCursorPos(1, 1)
+        c.write(trim("Render-Fehler: " .. tostring(err), width))
+    end
+    c.setVisible(true)
+end
+
+local function render()
+    if not state.canvas then createCanvas() end
+    if not state.canvas then return end
+    local width, height = state.canvas.getSize()
+    if width >= 48 and height >= 20 then renderDashboard() else renderCompact() end
 end
 
 -- ---------------------------------------------------------------------------
